@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+title: "Reflexive Poker Agents"
+message: "If you use this research software, please cite the repository and the associated preprint."
+type: software
+authors:
+  - family-names: Gao
+    given-names: Jihe
+    email: jihe.gao@gmail.com
+repository-code: "https://github.com/jihegao/reflexive-poker-agents"
+version: 0.3.0
+date-released: 2026-07-29
+license: MIT

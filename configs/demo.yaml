@@ -1,0 +1,10 @@
+hands: 80
+seeds: [11, 17]
+regime_switch_hand: 42
+starting_stack: 100.0
+conditions:
+  - no_reflection
+  - local_reflection
+  - situated_open_loop
+  - situated_reflection
+  - situated_fixed_depth3

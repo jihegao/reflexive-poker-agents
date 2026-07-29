@@ -1,0 +1,34 @@
+# Frozen confirmatory simulation used in the July 2026 manuscript.
+hands: 400
+seeds:
+  start: 3000
+  count: 60
+scenario: hidden_shift
+regime_switch_hand: 200
+fixed_switch_hand: 24
+max_signal_hands: 85
+starting_stack: 100.0
+equity_samples: 3
+max_workers: 5
+conditions:
+  - no_reflection
+  - local_reflection
+  - situated_open_loop
+  - situated_reflection
+  - situated_fixed_depth3
+primary_outcome: chips_per_100
+primary_contrasts:
+  - [situated_reflection, no_reflection]
+  - [situated_reflection, local_reflection]
+  - [situated_reflection, situated_open_loop]
+  - [situated_reflection, situated_fixed_depth3]
+mechanism_outcomes:
+  - image_mae
+  - strategy_switch_hand
+  - response_brier
+  - avg_reasoning_ops
+  - accuracy_efficiency_score
+inference:
+  paired_bootstrap_resamples: 20000
+  sign_flip_permutations: 50000
+  multiplicity: holm_for_primary_profit_contrasts

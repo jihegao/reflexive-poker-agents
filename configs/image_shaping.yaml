@@ -1,0 +1,23 @@
+experiment: strategic_public_image_shaping
+hands: 320
+signal_window: [0, 30]
+early_exploitation_window: [30, 120]
+regime_switch_hand: 160
+equity_samples: 3
+fixed_signal_hands: 30
+max_signal_hands: 85
+static:
+  seed_start: 1000
+  seeds: 80
+hidden_shift:
+  seed_start: 2000
+  seeds: 40
+conditions:
+  - myopic_control
+  - passive_image_tracking
+  - open_loop_shaping
+  - closed_loop_shaping
+inference:
+  unit: seed
+  bootstrap_resamples: 20000
+  sign_flip_permutations: 50000

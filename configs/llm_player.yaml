@@ -1,0 +1,25 @@
+experiment: llm_player_integration_evaluation
+provider: mock
+real_provider: openai_responses
+model: gpt-5-mini
+opponents:
+  - tag
+  - calling_station
+  - closed_loop_shaper
+seeds:
+  start: 8100
+  count: 6
+hands_per_mirror: 24
+seat_mirroring: true
+equity_samples: 2
+memory_hands: 5
+logging:
+  decision_trace: jsonl
+  reflection_trace: jsonl
+  record_prompt_state: true
+  record_audit_rationale: true
+  record_hidden_chain_of_thought: false
+  record_usage_and_latency: true
+interpretation:
+  mock_run_is_engineering_only: true
+  requires_openai_api_key_for_model_claims: true

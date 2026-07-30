@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reflexive-poker-agents"
-version = "0.3.0"
+version = "0.5.0"
 description = "A reproducible multi-agent poker testbed for situated self-models, social observation feedback, and adaptive reasoning depth."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+llm = [
+  "openai>=2.0",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",

@@ -4,7 +4,7 @@ import json
 import os
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -12,8 +12,7 @@ from .agents import AgentStyle, PokerAgent
 from .cards import cards_to_str
 from .depth import AdaptiveDepthController
 from .equity import estimate_equity
-from .models import ActionType, Decision, DecisionContext, HandRecord
-
+from .models import ActionEvent, ActionType, Decision, DecisionContext, HandRecord
 
 DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -241,7 +240,7 @@ class DeterministicNarrativeProvider:
             else:
                 action = "check_call"
         if action not in legal:
-            action = "check_call" if "check_call" in legal else sorted(legal)[0]
+            action = "check_call" if "check_call" in legal else min(legal)
 
         margin = equity - pot_odds
         confidence = min(0.94, max(0.51, 0.62 + abs(margin) * 0.42))
@@ -327,7 +326,9 @@ class DeterministicNarrativeProvider:
                 if positive and avg_confidence >= 0.6
                 else "单手结果不足以验证置信度；继续累积样本。"
             ),
-            "confidence_after": min(0.90, max(0.45, avg_confidence + (0.02 if positive else -0.03))),
+            "confidence_after": min(
+                0.90, max(0.45, avg_confidence + (0.02 if positive else -0.03))
+            ),
         }
         latency_ms = 1000.0 * (time.perf_counter() - started)
         text = json.dumps(payload, ensure_ascii=False)
@@ -369,18 +370,20 @@ class LLMPlayer(PokerAgent):
         self,
         name: str,
         seed: int,
-        opponents: tuple[str, ...],
         provider: LLMProvider,
         style: AgentStyle | None = None,
         trace_dir: Path | None = None,
         reflection_memory_size: int = 6,
+        *,
+        opponents: tuple[str, ...] = (),
+        memory_hands: int | None = None,
     ) -> None:
         super().__init__(name, seed, style)
         self.opponents = opponents
         self.provider = provider
         self.depth_controller = AdaptiveDepthController(opponents)
         self.trace_dir = trace_dir
-        self.reflection_memory_size = reflection_memory_size
+        self.reflection_memory_size = memory_hands or reflection_memory_size
         self.decision_traces: list[dict[str, Any]] = []
         self.reflection_traces: list[dict[str, Any]] = []
         self._hand_decisions: dict[int, list[dict[str, Any]]] = {}
@@ -388,6 +391,12 @@ class LLMPlayer(PokerAgent):
         self.recent_rewards: list[float] = []
         self.provider_failures = 0
         self.illegal_action_count = 0
+        self.invalid_actions = 0
+        self.public_aggressive_actions = 0
+        self.public_passive_actions = 0
+        # Compatibility aliases retained for the published v0.5.0 trace contract.
+        self.llm_decision_log = self.decision_traces
+        self.llm_reflection_log = self.reflection_traces
         if trace_dir is not None:
             trace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -418,6 +427,16 @@ class LLMPlayer(PokerAgent):
             sum(folds) / len(folds) if folds else 0.5,
         )
 
+    def observe_action(self, event: ActionEvent) -> None:
+        super().observe_action(event)
+        if event.actor == self.name:
+            if event.action is ActionType.RAISE:
+                self.public_aggressive_actions += 1
+            else:
+                self.public_passive_actions += 1
+            return
+        self.depth_controller.opponent_counts[event.actor][event.action.value] += 1
+
     def _decision_state(self, context: DecisionContext, equity: float) -> dict[str, Any]:
         depth = self.depth_controller.choose_depth()
         prediction = self.depth_controller.predict(depth, context.opponents, {})
@@ -432,8 +451,8 @@ class LLMPlayer(PokerAgent):
             "hand_index": context.hand_index,
             "street": context.street.value,
             "hole_cards": cards_to_str(context.hole_cards),
-            "community_cards": cards_to_str(context.community_cards),
-            "position_index": context.position,
+            "community_cards": cards_to_str(context.board),
+            "position_index": context.button_distance,
             "active_players": context.active_players,
             "pot": context.pot,
             "to_call": context.to_call,
@@ -448,15 +467,7 @@ class LLMPlayer(PokerAgent):
             "opponent_fold_mean": opponent_fold,
             "recent_reward_mean": recent_reward_mean,
             "recent_reflections": self.recent_reflections[-self.reflection_memory_size :],
-            "public_history": [
-                {
-                    "street": event.street.value,
-                    "actor": event.actor,
-                    "action": event.action.value,
-                    "amount": event.amount,
-                }
-                for event in context.history
-            ][-16:],
+            "public_history": [],
         }
 
     @staticmethod
@@ -474,16 +485,9 @@ class LLMPlayer(PokerAgent):
         if action not in context.legal_actions:
             return fallback, f"provider chose illegal action {action.value}"
         if action is ActionType.RAISE:
-            amount = min(
-                context.stack,
-                max(
-                    context.min_raise,
-                    context.to_call + context.pot * float(payload["raise_scale"]),
-                ),
-            )
-            if amount < context.min_raise:
-                return fallback, "provider raise amount below minimum"
-            return Decision(action, amount=amount, reasoning_depth=0), None
+            return Decision(
+                action, raise_scale=float(payload["raise_scale"]), reasoning_depth=0
+            ), None
         return Decision(action, reasoning_depth=0), None
 
     def _write_jsonl(self, name: str, record: dict[str, Any]) -> None:
@@ -495,7 +499,7 @@ class LLMPlayer(PokerAgent):
     def act(self, context: DecisionContext) -> Decision:
         equity = estimate_equity(
             context.hole_cards,
-            context.community_cards,
+            context.board,
             context.active_players - 1,
             self.rng,
             samples=self.style.equity_samples,
@@ -518,31 +522,38 @@ class LLMPlayer(PokerAgent):
             )
             if error:
                 self.illegal_action_count += 1
+                self.invalid_actions += 1
         except Exception as exc:  # noqa: BLE001 - trace provider failures and continue safely.
             self.provider_failures += 1
             error = f"{type(exc).__name__}: {exc}"
             decision = fallback
 
-        payload = provider_response.payload if provider_response is not None else {
-            "action": fallback.action.value,
-            "raise_scale": 0.5,
-            "confidence": 0.0,
-            "situation_summary": "provider failure; fallback policy used",
-            "rationale": "provider output unavailable",
-            "self_model": "unavailable",
-            "opponent_model": "unavailable",
-            "risk_flags": ["provider_failure"],
-            "next_step": "retry provider on next decision",
-        }
+        payload = (
+            provider_response.payload
+            if provider_response is not None
+            else {
+                "action": fallback.action.value,
+                "raise_scale": 0.5,
+                "confidence": 0.0,
+                "situation_summary": "provider failure; fallback policy used",
+                "rationale": "provider output unavailable",
+                "self_model": "unavailable",
+                "opponent_model": "unavailable",
+                "risk_flags": ["provider_failure"],
+                "next_step": "retry provider on next decision",
+            }
+        )
         trace = {
             "trace_type": "decision",
+            "hand_index": context.hand_index,
+            "street": context.street.value,
             "agent": self.name,
             "condition": self.condition,
             "state": state,
             "provider_output": payload,
             "final_decision": {
                 "action": decision.action.value,
-                "amount": decision.amount,
+                "raise_scale": decision.raise_scale,
                 "fallback_used": error is not None,
                 "error": error,
             },
@@ -554,12 +565,14 @@ class LLMPlayer(PokerAgent):
             "total_tokens": provider_response.total_tokens if provider_response else None,
             "response_id": provider_response.response_id if provider_response else None,
         }
+        trace["final_action"] = decision.action.value
+        trace["output"] = payload
         self.decision_traces.append(trace)
         self._hand_decisions.setdefault(context.hand_index, []).append(trace)
         self._write_jsonl("decision_traces.jsonl", trace)
         return decision
 
-    def observe_hand_end(self, record: HandRecord) -> None:
+    def on_hand_end(self, record: HandRecord) -> None:
         super().observe_hand_end(record)
         reward = float(record.rewards.get(self.name, 0.0))
         self.recent_rewards.append(reward)
@@ -567,7 +580,7 @@ class LLMPlayer(PokerAgent):
         state = {
             "task": "reflect_on_completed_hand",
             "hand_index": record.hand_index,
-            "community_cards": cards_to_str(record.community_cards),
+            "community_cards": cards_to_str(record.board),
             "showdown": record.showdown,
             "reward": reward,
             "winners": list(record.winners),
@@ -576,9 +589,9 @@ class LLMPlayer(PokerAgent):
                     "street": event.street.value,
                     "actor": event.actor,
                     "action": event.action.value,
-                    "amount": event.amount,
+                    "paid": event.paid,
                 }
-                for event in record.events
+                for event in record.actions
             ],
             "decisions": [
                 {
@@ -589,9 +602,7 @@ class LLMPlayer(PokerAgent):
                 }
                 for trace in decisions
             ],
-            "recent_reward_mean": (
-                sum(self.recent_rewards[-10:]) / len(self.recent_rewards[-10:])
-            ),
+            "recent_reward_mean": (sum(self.recent_rewards[-10:]) / len(self.recent_rewards[-10:])),
         }
         try:
             response = self.provider.reflect(state)
@@ -614,6 +625,7 @@ class LLMPlayer(PokerAgent):
             }
         trace = {
             "trace_type": "reflection",
+            "hand_index": record.hand_index,
             "agent": self.name,
             "condition": self.condition,
             "state": state,

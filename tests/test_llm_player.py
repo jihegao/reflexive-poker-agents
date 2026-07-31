@@ -21,7 +21,9 @@ def test_llm_player_records_decisions_and_reflections() -> None:
     assert len(records) == 3
     assert llm.llm_decision_log
     assert len(llm.llm_reflection_log) == 3
-    assert all(item["final_action"] in {"fold", "check_call", "raise"} for item in llm.llm_decision_log)
+    assert all(
+        item["final_action"] in {"fold", "check_call", "raise"} for item in llm.llm_decision_log
+    )
     assert all(item["output"]["rationale"] for item in llm.llm_decision_log if item["output"])
 
 
@@ -40,6 +42,7 @@ def test_small_llm_evaluation(tmp_path: Path) -> None:
     assert (tmp_path / "decision_traces.jsonl.gz").exists()
     assert (tmp_path / "reflection_traces.jsonl.gz").exists()
     assert (tmp_path / "trace_examples.md").exists()
+
 
 class _FakeUsage:
     input_tokens = 12

@@ -3,18 +3,10 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from .agents import (
-    AgentStyle,
-    MyopicControlAgent,
-    OpenLoopImageShapingAgent,
-    PassiveImageTrackingAgent,
-    PokerAgent,
-    SituatedReflectionAgent,
-)
+from .agents import AgentStyle, PokerAgent
 from .depth import AdaptiveDepthController
 from .equity import estimate_equity
 from .models import ActionType, Decision, DecisionContext
-
 
 TYPE_NAMES = (
     "rock",
@@ -221,8 +213,12 @@ def sampled_style(player_type: str, seed: int, equity_samples: int) -> AgentStyl
     return AgentStyle(
         aggression=min(max(spec.aggression + rng.uniform(-0.035, 0.035), 0.03), 0.95),
         risk_margin=spec.risk_margin + rng.uniform(-0.012, 0.012),
-        belief_sensitivity=min(max(spec.belief_sensitivity + rng.uniform(-0.035, 0.035), 0.0), 0.60),
-        social_learning_rate=min(max(spec.social_learning_rate + rng.uniform(-0.035, 0.035), 0.03), 0.40),
+        belief_sensitivity=min(
+            max(spec.belief_sensitivity + rng.uniform(-0.035, 0.035), 0.0), 0.60
+        ),
+        social_learning_rate=min(
+            max(spec.social_learning_rate + rng.uniform(-0.035, 0.035), 0.03), 0.40
+        ),
         equity_samples=equity_samples,
     )
 
@@ -241,31 +237,6 @@ def make_tournament_agent(
         return TypedPolicyAgent(name, seed, player_type, style)
     if player_type == "calling_station":
         return CallingStationAgent(name, seed, style)
-    if player_type == "myopic":
-        agent = MyopicControlAgent(name, seed, style)
-        agent.condition = player_type
-        return agent
-    if player_type == "passive_tracker":
-        agent = PassiveImageTrackingAgent(name, seed, opponents, style)
-        agent.condition = player_type
-        return agent
-    if player_type == "open_loop_shaper":
-        agent = OpenLoopImageShapingAgent(
-            name,
-            seed,
-            opponents,
-            style,
-            fixed_signal_hands=30,
-        )
-        agent.condition = player_type
-        return agent
-    agent = SituatedReflectionAgent(
-        name,
-        seed,
-        opponents=opponents,
-        style=style,
-        max_signal_hands=85,
-        use_response_feedback=True,
-        condition_label=player_type,
-    )
-    return agent
+    # The generic policy remains available for the research controls whose richer
+    # image-model implementations are not part of this compact release.
+    return TypedPolicyAgent(name, seed, player_type, style)

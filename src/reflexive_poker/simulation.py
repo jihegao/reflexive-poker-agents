@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import math
 import random
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 
@@ -73,7 +73,12 @@ def run_condition(
             early_signal = False
             signal_done = True
             signal_stop_hand = min(signal_stop_hand, hand)
-        if spec.shaping == "closed_loop" and hand >= 8 and public_aggression < 0.47 and confidence > 0.36:
+        if (
+            spec.shaping == "closed_loop"
+            and hand >= 8
+            and public_aggression < 0.47
+            and confidence > 0.36
+        ):
             early_signal = False
             signal_done = True
             signal_stop_hand = min(signal_stop_hand, hand)
@@ -107,7 +112,11 @@ def run_condition(
                 self_estimate = 0.86 * self_estimate + 0.14 * public_aggression
             else:
                 self_estimate = 0.97 * self_estimate + 0.03 * (0.42 if early_signal else 0.54)
-        image_mae = abs(self_estimate - public_aggression) if spec.has_self_model else abs(0.50 - public_aggression)
+        image_mae = (
+            abs(self_estimate - public_aggression)
+            if spec.has_self_model
+            else abs(0.50 - public_aggression)
+        )
         confidence = 0.92 * confidence + 0.08 * (1.0 - min(1.0, image_mae * 4.0))
 
         if spec.fixed_depth is not None:
@@ -123,7 +132,7 @@ def run_condition(
             fold_rate = 0.28 + 0.15 * raised
         opponent_fold = rng.random() < fold_rate
 
-        immediate = (1.2 if opponent_fold and raised else 0.0)
+        immediate = 1.2 if opponent_fold and raised else 0.0
         showdown = (strength - 0.50) * 2.0 + rng.gauss(0.0, 0.70)
         cost = 0.55 if raised else 0.12
         reward = immediate + showdown - cost
@@ -181,23 +190,17 @@ def run_study(
 
 
 def summarize(data: pd.DataFrame) -> pd.DataFrame:
-    per_run = (
-        data.groupby(["condition", "seed"], as_index=False)
-        .agg(
-            chips_per_100=("reward", lambda x: float(x.sum()) / len(x) * 100.0),
-            image_mae=("image_mae", "mean"),
-            avg_reasoning_ops=("reasoning_ops", "mean"),
-            raise_rate=("raised", "mean"),
-            signal_stop_hand=("signal_stop_hand", "min"),
-        )
+    per_run = data.groupby(["condition", "seed"], as_index=False).agg(
+        chips_per_100=("reward", lambda x: float(x.sum()) / len(x) * 100.0),
+        image_mae=("image_mae", "mean"),
+        avg_reasoning_ops=("reasoning_ops", "mean"),
+        raise_rate=("raised", "mean"),
+        signal_stop_hand=("signal_stop_hand", "min"),
     )
-    return (
-        per_run.groupby("condition", as_index=False)
-        .agg(
-            chips_per_100=("chips_per_100", "mean"),
-            image_mae=("image_mae", "mean"),
-            avg_reasoning_ops=("avg_reasoning_ops", "mean"),
-            raise_rate=("raise_rate", "mean"),
-            signal_stop_hand=("signal_stop_hand", "mean"),
-        )
+    return per_run.groupby("condition", as_index=False).agg(
+        chips_per_100=("chips_per_100", "mean"),
+        image_mae=("image_mae", "mean"),
+        avg_reasoning_ops=("avg_reasoning_ops", "mean"),
+        raise_rate=("raise_rate", "mean"),
+        signal_stop_hand=("signal_stop_hand", "mean"),
     )

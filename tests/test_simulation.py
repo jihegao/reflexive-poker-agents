@@ -1,4 +1,9 @@
-from reflexive_poker.simulation import CONFIRMATORY_CONDITIONS, IMAGE_SHAPING_CONDITIONS, run_study, summarize
+from reflexive_poker.simulation import (
+    CONFIRMATORY_CONDITIONS,
+    IMAGE_SHAPING_CONDITIONS,
+    run_study,
+    summarize,
+)
 
 
 def test_confirmatory_demo_runs():

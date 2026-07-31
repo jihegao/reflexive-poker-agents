@@ -29,10 +29,22 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.command == "demo":
         seeds = range(11, 11 + args.seeds)
-        data = run_study(CONFIRMATORY_CONDITIONS, seeds=seeds, hands=args.hands, hidden_shift=True, output=args.output)
+        data = run_study(
+            CONFIRMATORY_CONDITIONS,
+            seeds=seeds,
+            hands=args.hands,
+            hidden_shift=True,
+            output=args.output,
+        )
     elif args.command == "image-shaping":
         seeds = range(1000, 1000 + args.seeds)
-        data = run_study(IMAGE_SHAPING_CONDITIONS, seeds=seeds, hands=args.hands, hidden_shift=args.hidden_shift, output=args.output)
+        data = run_study(
+            IMAGE_SHAPING_CONDITIONS,
+            seeds=seeds,
+            hands=args.hands,
+            hidden_shift=args.hidden_shift,
+            output=args.output,
+        )
     else:  # pragma: no cover
         raise SystemExit(f"unknown command: {args.command}")
 

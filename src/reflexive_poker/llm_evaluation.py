@@ -61,6 +61,7 @@ def _run_mirror(
             equity_samples=config.equity_samples,
         ),
         memory_hands=5,
+        opponents=(names[opponent_seat],),
     )
     opponent = make_tournament_agent(
         opponent_type,
@@ -136,18 +137,15 @@ def _run_mirror(
 
 
 def _paired_summary(matches: pd.DataFrame) -> pd.DataFrame:
-    mirror = (
-        matches.groupby(["opponent_type", "seed"], as_index=False)
-        .agg(
-            llm_chips_per_100=("llm_chips_per_100", "mean"),
-            fallback_count=("fallback_count", "sum"),
-            decision_count=("decision_count", "sum"),
-            reflection_count=("reflection_count", "sum"),
-            invalid_actions=("invalid_actions", "sum"),
-            provider_failures=("provider_failures", "sum"),
-            mean_decision_latency_ms=("mean_decision_latency_ms", "mean"),
-            total_tokens=("total_tokens", "sum"),
-        )
+    mirror = matches.groupby(["opponent_type", "seed"], as_index=False).agg(
+        llm_chips_per_100=("llm_chips_per_100", "mean"),
+        fallback_count=("fallback_count", "sum"),
+        decision_count=("decision_count", "sum"),
+        reflection_count=("reflection_count", "sum"),
+        invalid_actions=("invalid_actions", "sum"),
+        provider_failures=("provider_failures", "sum"),
+        mean_decision_latency_ms=("mean_decision_latency_ms", "mean"),
+        total_tokens=("total_tokens", "sum"),
     )
     rows = []
     for opponent, group in mirror.groupby("opponent_type"):
@@ -176,7 +174,11 @@ def _paired_summary(matches: pd.DataFrame) -> pd.DataFrame:
 
 def _write_jsonl(path: Path, items: list[dict[str, Any]]) -> None:
     opener = gzip.open if path.suffix == ".gz" else path.open
-    with opener(path, "wt", encoding="utf-8") if path.suffix == ".gz" else opener("w", encoding="utf-8") as handle:
+    with (
+        opener(path, "wt", encoding="utf-8")
+        if path.suffix == ".gz"
+        else opener("w", encoding="utf-8") as handle
+    ):
         for item in items:
             handle.write(json.dumps(item, ensure_ascii=False) + "\n")
 

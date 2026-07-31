@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from .agents import PokerAgent
 from .cards import make_deck
@@ -33,7 +33,9 @@ class HoldemEnvironment:
     discretized and raises are capped to keep experiments fast and interpretable.
     """
 
-    def __init__(self, agents: list[PokerAgent], seed: int, config: EnvironmentConfig | None = None) -> None:
+    def __init__(
+        self, agents: list[PokerAgent], seed: int, config: EnvironmentConfig | None = None
+    ) -> None:
         if len(agents) < 2:
             raise ValueError("Texas Hold'em requires at least two agents")
         self.agents = agents
@@ -89,7 +91,9 @@ class HoldemEnvironment:
         for street, visible_board, start in streets:
             if sum(active) <= 1:
                 break
-            street_contrib = preflop_contrib[:] if street == Street.PREFLOP else [0.0 for _ in self.agents]
+            street_contrib = (
+                preflop_contrib[:] if street == Street.PREFLOP else [0.0 for _ in self.agents]
+            )
             self._betting_round(
                 hand_index=hand_index,
                 street=street,
@@ -112,8 +116,7 @@ class HoldemEnvironment:
             winners = live_indices
         else:
             ranks = {
-                idx: best_hand_rank((*holes[self.agents[idx].name], *board))
-                for idx in live_indices
+                idx: best_hand_rank((*holes[self.agents[idx].name], *board)) for idx in live_indices
             }
             best = max(ranks.values())
             winners = [idx for idx, hand_rank in ranks.items() if hand_rank == best]
@@ -126,10 +129,7 @@ class HoldemEnvironment:
         }
         winner_names = tuple(self.agents[idx].name for idx in winners)
         regime = self.regime_for_hand(hand_index)
-        snapshots = {
-            agent.name: agent.snapshot()
-            for agent in self.agents
-        }
+        snapshots = {agent.name: agent.snapshot() for agent in self.agents}
         record = HandRecord(
             hand_index=hand_index,
             button=button,
@@ -220,7 +220,9 @@ class HoldemEnvironment:
 
             pot_before = sum(total_contrib)
             faced_raise = to_call > 1e-9 and last_raiser is not None
-            raiser_name = self.agents[last_raiser].name if faced_raise and last_raiser is not None else None
+            raiser_name = (
+                self.agents[last_raiser].name if faced_raise and last_raiser is not None else None
+            )
             paid = 0.0
             if decision_action == ActionType.FOLD:
                 active[actor] = False
@@ -235,7 +237,9 @@ class HoldemEnvironment:
                 call_paid = self._pay(actor, to_call, stacks, total_contrib)
                 street_contrib[actor] += call_paid
                 pot_after_call = sum(total_contrib)
-                increment = max(self.config.big_blind, decision.raise_scale * max(pot_after_call, 1.0))
+                increment = max(
+                    self.config.big_blind, decision.raise_scale * max(pot_after_call, 1.0)
+                )
                 raise_paid = self._pay(actor, increment, stacks, total_contrib)
                 street_contrib[actor] += raise_paid
                 paid = call_paid + raise_paid
@@ -245,9 +249,7 @@ class HoldemEnvironment:
                 if stacks[actor] <= 1e-9:
                     all_in[actor] = True
                 pending = {
-                    idx
-                    for idx in range(n)
-                    if idx != actor and active[idx] and not all_in[idx]
+                    idx for idx in range(n) if idx != actor and active[idx] and not all_in[idx]
                 }
 
             event = ActionEvent(
@@ -290,5 +292,7 @@ class HoldemEnvironment:
 
 
 def mean_ground_truth_image(agents: Iterable[PokerAgent], target_name: str) -> float:
-    values = [agent.beliefs[target_name].aggression.mean for agent in agents if agent.name != target_name]
+    values = [
+        agent.beliefs[target_name].aggression.mean for agent in agents if agent.name != target_name
+    ]
     return sum(values) / len(values) if values else 0.5

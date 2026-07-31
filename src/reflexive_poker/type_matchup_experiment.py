@@ -27,7 +27,7 @@ class TypeMatchupConfig:
 
 def _agent_seed(seed: int, player_type: str) -> int:
     digest = hashlib.blake2b(
-        f"{seed}:{player_type}".encode("utf-8"),
+        f"{seed}:{player_type}".encode(),
         digest_size=4,
     ).digest()
     return int.from_bytes(digest, "big")
@@ -111,7 +111,9 @@ def _run_pair_seed(
     return row
 
 
-def _run_ecology_seed(seed: int, hands: int, equity_samples: int) -> list[dict[str, float | int | str]]:
+def _run_ecology_seed(
+    seed: int, hands: int, equity_samples: int
+) -> list[dict[str, float | int | str]]:
     import random
 
     rng = random.Random(seed * 99991)
@@ -166,7 +168,9 @@ def run_type_matchups(config: TypeMatchupConfig) -> dict[str, pd.DataFrame]:
     ]
     pair_rows: list[dict[str, float | int | str]] = []
     ecology_rows: list[dict[str, float | int | str]] = []
-    with ProcessPoolExecutor(max_workers=config.workers, mp_context=multiprocessing.get_context("spawn")) as executor:
+    with ProcessPoolExecutor(
+        max_workers=config.workers, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
         futures = {
             executor.submit(
                 _run_pair_seed,
@@ -180,7 +184,9 @@ def run_type_matchups(config: TypeMatchupConfig) -> dict[str, pd.DataFrame]:
         }
         for future in as_completed(futures):
             pair_rows.append(future.result())
-    with ProcessPoolExecutor(max_workers=config.workers, mp_context=multiprocessing.get_context("spawn")) as executor:
+    with ProcessPoolExecutor(
+        max_workers=config.workers, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
         futures = {
             executor.submit(
                 _run_ecology_seed,

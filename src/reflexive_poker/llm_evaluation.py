@@ -12,9 +12,11 @@ import pandas as pd
 from .agents import AgentStyle
 from .environment import EnvironmentConfig, HoldemEnvironment
 from .llm_player import (
+    CodexProvider,
     DeterministicNarrativeProvider,
     LLMPlayer,
     OpenAIResponsesProvider,
+    OpenCodeGoProvider,
 )
 from .tournament_agents import make_tournament_agent
 
@@ -35,6 +37,10 @@ def _provider(kind: str, model: str, seed: int):
         return DeterministicNarrativeProvider(seed=seed)
     if kind == "openai":
         return OpenAIResponsesProvider(model=model)
+    if kind == "opencode-go":
+        return OpenCodeGoProvider(model=model)
+    if kind == "codex":
+        return CodexProvider(model=model)
     raise ValueError(f"Unknown provider: {kind}")
 
 
@@ -101,16 +107,14 @@ def _run_mirror(
         for item in llm.llm_reflection_log
     ]
     latency_values = [
-        item.get("provider", {}).get("latency_ms")
+        item.get("latency_ms")
         for item in llm.llm_decision_log
-        if isinstance(item.get("provider"), dict)
-        and item.get("provider", {}).get("latency_ms") is not None
+        if item.get("latency_ms") is not None
     ]
     total_tokens = [
-        item.get("provider", {}).get("total_tokens")
+        item.get("total_tokens")
         for item in llm.llm_decision_log + llm.llm_reflection_log
-        if isinstance(item.get("provider"), dict)
-        and item.get("provider", {}).get("total_tokens") is not None
+        if item.get("total_tokens") is not None
     ]
     row = {
         "provider": config.provider,
@@ -123,7 +127,9 @@ def _run_mirror(
         "opponent_chips_per_100": 100.0 * opponent_reward / config.hands_per_mirror,
         "decision_count": len(decisions),
         "reflection_count": len(reflections),
-        "fallback_count": sum(bool(item.get("fallback")) for item in decisions),
+        "fallback_count": sum(
+            bool(item.get("final_decision", {}).get("fallback_used")) for item in decisions
+        ),
         "provider_failures": llm.provider_failures,
         "invalid_actions": llm.invalid_actions,
         "mean_decision_latency_ms": (

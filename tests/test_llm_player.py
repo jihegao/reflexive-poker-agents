@@ -42,6 +42,7 @@ def test_small_llm_evaluation(tmp_path: Path) -> None:
     assert (tmp_path / "decision_traces.jsonl.gz").exists()
     assert (tmp_path / "reflection_traces.jsonl.gz").exists()
     assert (tmp_path / "trace_examples.md").exists()
+    assert result["summary"].loc[0, "total_tokens"] > 0
 
 
 class _FakeUsage:
@@ -80,3 +81,45 @@ def test_openai_provider_uses_responses_structured_output() -> None:
     assert response.total_tokens == 20
     assert client.responses.kwargs["text"]["format"]["type"] == "json_schema"
     assert client.responses.kwargs["text"]["format"]["strict"] is True
+
+
+def test_opencode_go_provider_uses_local_cli_with_schema_prompt() -> None:
+    from reflexive_poker.llm_player import OpenCodeGoProvider
+
+    prompt = None
+
+    def run(value):
+        nonlocal prompt
+        prompt = value
+        return _FakeResponse.output_text
+
+    provider = OpenCodeGoProvider(run=run)
+    response = provider.decide({"legal_actions": ["check_call"], "hand_index": 0})
+    assert response.payload["action"] == "check_call"
+    assert "JSON schema name: poker_decision" in prompt
+    assert '"legal_actions": ["check_call"]' in prompt
+
+
+def test_codex_provider_parses_json_events_and_usage() -> None:
+    from reflexive_poker.llm_player import DECISION_SCHEMA, CodexProvider
+
+    captured = None
+
+    def run(prompt, schema):
+        nonlocal captured
+        captured = (prompt, schema)
+        return "\n".join(
+            [
+                '{"type":"thread.started"}',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"' + _FakeResponse.output_text.replace('"', '\\"') + '"}}',
+                '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":8}}',
+            ]
+        )
+
+    provider = CodexProvider(run=run)
+    response = provider.decide({"legal_actions": ["check_call"], "hand_index": 0})
+    assert response.payload["action"] == "check_call"
+    assert response.input_tokens == 12
+    assert response.output_tokens == 8
+    assert response.total_tokens == 20
+    assert captured[1] == DECISION_SCHEMA

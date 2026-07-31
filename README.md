@@ -57,6 +57,34 @@ PYTHONPATH=src python scripts/run_llm_player_evaluation.py \
 
 Start small: a full replacement of the frozen mock run would require thousands of model calls.
 
+## Run a live OpenCode Go smoke test
+
+With a locally authenticated `opencode` CLI, the integration reuses its `opencode-go` credential without storing a key in this repository:
+
+```bash
+PYTHONPATH=src python scripts/run_llm_player_evaluation.py \
+  --provider opencode-go \
+  --model deepseek-v4-flash \
+  --hands 2 \
+  --seed-count 1 \
+  --opponents tag \
+  --output results/llm_player/opencode_go_deepseek_v4_flash_smoke
+```
+
+## Run a local Codex-account smoke test
+
+```bash
+PYTHONPATH=src python scripts/run_llm_player_evaluation.py \
+  --provider codex \
+  --model current \
+  --hands 1 \
+  --seed-count 1 \
+  --opponents tag \
+  --output results/llm_player/codex_current_smoke
+```
+
+This uses the local Codex login and emits per-turn token accounting in the traces.
+
 ## Earlier experiments
 
 The repository also contains the situated-reflection, image-shaping, and player-type matchup environments used in earlier project phases. These experiments consistently separate mechanism claims from poker-profit claims: improved self-model fidelity or belief control does not by itself establish higher reward.

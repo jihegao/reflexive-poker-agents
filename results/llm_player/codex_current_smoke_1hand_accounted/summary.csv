@@ -1,0 +1,2 @@
+opponent_type,seeds,mean_llm_chips_per_100,median_llm_chips_per_100,positive_seed_rate,decision_count,reflection_count,fallback_rate,invalid_action_rate,provider_failure_count,mean_decision_latency_ms,total_tokens
+tag,1,0.0,0.0,0.0,2,2,0.0,0.0,0,16952.088874502806,79470

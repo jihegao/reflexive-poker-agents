@@ -8,7 +8,7 @@ from reflexive_poker.llm_evaluation import LLMEvaluationConfig, run_llm_evaluati
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate LLMPlayer and save decision/reflection traces")
-    parser.add_argument("--provider", choices=("mock", "openai"), default="mock")
+    parser.add_argument("--provider", choices=("mock", "openai", "opencode-go", "codex"), default="mock")
     parser.add_argument("--model", default="gpt-5-mini")
     parser.add_argument("--hands", type=int, default=24)
     parser.add_argument("--seed-start", type=int, default=8100)

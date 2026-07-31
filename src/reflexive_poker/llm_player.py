@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -193,6 +195,238 @@ class OpenAIResponsesProvider:
             ),
             state=state,
             schema_name="poker_reflection",
+            schema=REFLECTION_SCHEMA,
+        )
+
+
+class OpenCodeGoProvider:
+    """OpenCode Go adapter that delegates authenticated calls to the local CLI."""
+
+    name = "opencode_go"
+
+    def __init__(
+        self,
+        model: str = "deepseek-v4-flash",
+        command: str = "opencode",
+        run: Any | None = None,
+    ) -> None:
+        self.model = model
+        self.command = command
+        self.run = run or self._run
+
+    def _run(self, prompt: str) -> str:
+        try:
+            completed = subprocess.run(
+                [self.command, "run", "--model", f"opencode-go/{self.model}", prompt],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("`opencode` CLI is required for the opencode-go provider.") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("OpenCode Go request timed out after 180 seconds.") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"OpenCode Go request failed: {completed.stderr[-500:]}")
+        return completed.stdout
+
+    @staticmethod
+    def _json_output(output: str) -> dict[str, Any]:
+        decoder = json.JSONDecoder()
+        for start, character in enumerate(output):
+            if character != "{":
+                continue
+            try:
+                payload, _ = decoder.raw_decode(output[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        raise ValueError("OpenCode Go response did not contain a JSON object.")
+
+    def _call(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> ProviderResponse:
+        prompt = "\n\n".join(
+            [
+                instructions,
+                "Return exactly one JSON object and no Markdown or prose.",
+                f"JSON schema name: {schema_name}",
+                f"JSON schema: {json.dumps(schema, ensure_ascii=False, sort_keys=True)}",
+                f"Simulator state: {json.dumps(state, ensure_ascii=False, sort_keys=True)}",
+            ]
+        )
+        started = time.perf_counter()
+        output = self.run(prompt)
+        latency_ms = 1000.0 * (time.perf_counter() - started)
+        return ProviderResponse(
+            payload=self._json_output(output),
+            provider=self.name,
+            model=self.model,
+            latency_ms=latency_ms,
+            response_id=None,
+        )
+
+    def decide(self, state: dict[str, Any]) -> ProviderResponse:
+        legal = ", ".join(state["legal_actions"])
+        return self._call(
+            instructions=(
+                "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
+                f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
+                "odds rather than inventing card probabilities. Return concise audit fields only."
+            ),
+            state=state,
+            schema_name="poker_decision",
+            schema=DECISION_SCHEMA,
+        )
+
+    def reflect(self, state: dict[str, Any]) -> ProviderResponse:
+        return self._call(
+            instructions=(
+                "Review one completed simulated poker hand. Return a concise audit of outcome, "
+                "decision quality, belief updates, strategy adjustment, and confidence calibration. "
+                "Do not invent unseen hole cards."
+            ),
+            state=state,
+            schema_name="poker_reflection",
+            schema=REFLECTION_SCHEMA,
+        )
+
+
+class CodexProvider:
+    """Codex CLI provider using the locally authenticated account and JSON Schema output."""
+
+    name = "codex_exec"
+
+    def __init__(
+        self,
+        model: str = "current",
+        command: str = "codex",
+        run: Any | None = None,
+    ) -> None:
+        self.model = model
+        self.command = command
+        self.run = run or self._run
+
+    def _run(self, prompt: str, schema: dict[str, Any]) -> str:
+        with tempfile.TemporaryDirectory(prefix="reflexive-poker-codex-") as directory:
+            schema_path = Path(directory) / "output-schema.json"
+            schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+            command = [
+                self.command,
+                "exec",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--json",
+                "--color",
+                "never",
+                "--output-schema",
+                str(schema_path),
+            ]
+            if self.model != "current":
+                command.extend(["--model", self.model])
+            command.append(prompt)
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError("`codex` CLI is required for the codex provider.") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("Codex request timed out after 300 seconds.") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"Codex request failed: {completed.stderr[-500:]}")
+        return completed.stdout
+
+    @staticmethod
+    def _result(output: str) -> tuple[dict[str, Any], dict[str, int | None]]:
+        final_message: str | None = None
+        usage: dict[str, int | None] = {"input": None, "output": None, "total": None}
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "item.completed":
+                item = event.get("item", {})
+                if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                    final_message = item["text"]
+            if event.get("type") == "turn.completed":
+                reported = event.get("usage", {})
+                input_tokens = reported.get("input_tokens")
+                output_tokens = reported.get("output_tokens")
+                usage = {
+                    "input": input_tokens,
+                    "output": output_tokens,
+                    "total": (
+                        input_tokens + output_tokens
+                        if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+                        else None
+                    ),
+                }
+        if final_message is None:
+            raise ValueError("Codex response did not include a final agent message.")
+        return json.loads(final_message), usage
+
+    def _call(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema: dict[str, Any],
+    ) -> ProviderResponse:
+        prompt = "\n\n".join(
+            [
+                instructions,
+                "Return only the JSON object required by the supplied output schema.",
+                f"Simulator state: {json.dumps(state, ensure_ascii=False, sort_keys=True)}",
+            ]
+        )
+        started = time.perf_counter()
+        output = self.run(prompt, schema)
+        latency_ms = 1000.0 * (time.perf_counter() - started)
+        payload, usage = self._result(output)
+        return ProviderResponse(
+            payload=payload,
+            provider=self.name,
+            model=self.model,
+            latency_ms=latency_ms,
+            input_tokens=usage["input"],
+            output_tokens=usage["output"],
+            total_tokens=usage["total"],
+        )
+
+    def decide(self, state: dict[str, Any]) -> ProviderResponse:
+        legal = ", ".join(state["legal_actions"])
+        return self._call(
+            instructions=(
+                "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
+                f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
+                "odds rather than inventing card probabilities. Return concise audit fields only."
+            ),
+            state=state,
+            schema=DECISION_SCHEMA,
+        )
+
+    def reflect(self, state: dict[str, Any]) -> ProviderResponse:
+        return self._call(
+            instructions=(
+                "Review one completed simulated poker hand. Return a concise audit of outcome, "
+                "decision quality, belief updates, strategy adjustment, and confidence calibration. "
+                "Do not invent unseen hole cards."
+            ),
+            state=state,
             schema=REFLECTION_SCHEMA,
         )
 

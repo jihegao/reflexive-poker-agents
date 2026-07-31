@@ -1,7 +1,7 @@
 experiment: llm_player_integration_evaluation
 provider: mock
-real_provider: openai_responses
-model: gpt-5-mini
+real_provider: opencode_go
+model: deepseek-v4-flash
 opponents:
   - tag
   - calling_station
@@ -22,4 +22,4 @@ logging:
   record_usage_and_latency: true
 interpretation:
   mock_run_is_engineering_only: true
-  requires_openai_api_key_for_model_claims: true
+  requires_live_provider_for_model_claims: true

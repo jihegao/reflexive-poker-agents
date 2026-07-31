@@ -1,0 +1,3 @@
+provider,model,opponent_type,seed,swap,hands,llm_chips_per_100,opponent_chips_per_100,decision_count,reflection_count,fallback_count,provider_failures,invalid_actions,mean_decision_latency_ms,total_tokens,elapsed_seconds,showdown_rate
+opencode-go,deepseek-v4-flash,tag,8100,0,2,-75.0,75.0,2,2,0,0,0,,0,84.91808054200374,0.0
+opencode-go,deepseek-v4-flash,tag,8100,1,2,75.0,-75.0,1,2,0,0,0,,0,54.7669052919955,0.0

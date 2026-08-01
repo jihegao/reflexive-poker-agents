@@ -78,13 +78,14 @@ button:disabled { opacity: .38; cursor: not-allowed !important; }
 .seat { position: absolute; z-index: 5; min-width: 116px; transition: opacity .2s, filter .2s; }
 .seat-info { background: #0b1513; border: 1px solid #29443c; border-radius: 7px; padding: 6px 8px; box-shadow: 0 5px 12px rgba(0,0,0,.35); }
 .seat-info > div { display: flex; align-items: center; justify-content: space-between; }.seat-info b { font-size: 9px; letter-spacing: .04em; }.seat-info span { display: block; color: #8fa59e; margin-top: 3px; font: 9px DM Mono; }.seat-info em { display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: #d7b15f; color: #281e0d; font: 700 8px DM Mono; font-style: normal; }
-.seat-cards { position: absolute; left: 50%; transform: translateX(-50%); display: flex; gap: 2px; z-index: -1; }
+.seat-cards { position: absolute; left: 50%; transform: translateX(-50%); display: flex; gap: 2px; z-index: 1; }
 .seat-cards .card { width: 29px; height: 40px; padding: 3px; }.seat-cards .card b { font-size: 10px; }.seat-cards .card i { font-size: 11px; }
-.seat-0 { left: 50%; bottom: -42px; transform: translateX(-50%); min-width: 145px; }.seat-0 .seat-cards { bottom: 37px; }.seat-0 .seat-info { border-color: #4a9278; background: #0d211c; }
-.seat-1 { left: -60px; bottom: 14%; }.seat-1 .seat-cards,.seat-2 .seat-cards { left: 100%; bottom: 4px; }
+.seat-info { position: relative; z-index: 2; }
+.seat-0 { left: 50%; bottom: -42px; transform: translateX(-50%); min-width: 145px; }.seat-0 .seat-cards { bottom: calc(100% + 8px); }.seat-0 .seat-info { border-color: #4a9278; background: #0d211c; }
+.seat-1 { left: -60px; bottom: 14%; }.seat-1 .seat-cards,.seat-2 .seat-cards { left: calc(100% + 8px); bottom: 0; transform: none; }
 .seat-2 { left: -45px; top: 15%; }
-.seat-3 { left: 50%; top: -39px; transform: translateX(-50%); }.seat-3 .seat-cards { top: 38px; }
-.seat-4 { right: -45px; top: 15%; }.seat-4 .seat-cards,.seat-5 .seat-cards { left: 0; bottom: 4px; }
+.seat-3 { left: 50%; top: -39px; transform: translateX(-50%); }.seat-3 .seat-cards { top: calc(100% + 8px); }
+.seat-4 { right: -45px; top: 15%; }.seat-4 .seat-cards,.seat-5 .seat-cards { left: auto; right: calc(100% + 8px); bottom: 0; transform: none; }
 .seat-5 { right: -60px; bottom: 14%; }
 .seat.acting .seat-info { border-color: var(--gold); box-shadow: 0 0 0 1px rgba(229,187,105,.12), 0 0 20px rgba(229,187,105,.12); }
 .seat.acting::after { content: "ACTING"; position: absolute; top: -14px; left: 5px; color: var(--gold); font: 7px DM Mono; letter-spacing: .1em; }

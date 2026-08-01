@@ -120,6 +120,81 @@ The checked-in clean pilot report is under
 
 The repository also contains the situated-reflection, image-shaping, and player-type matchup environments used in earlier project phases. These experiments consistently separate mechanism claims from poker-profit claims: improved self-model fidelity or belief control does not by itself establish higher reward.
 
+## Phase 1 opponent-modeling experiment
+
+The Phase 1 runner separates history use, action prediction, strategy-type inference,
+and auditable recursive levels D2/D3. It uses a shared formation checkpoint, paired
+deck/seat seeds, bounded structured belief states, provider-call budgets, large-pot
+sensitivity checks, and a fail-closed provider gate. Existing `reflexive_on/off`
+artifacts are not relabeled as Phase 1 depth evidence.
+
+Run a short deterministic rule-agent smoke:
+
+```bash
+PYTHONPATH=src uv run python scripts/run_phase1_experiment.py \
+  --arena heads_up \
+  --opponent tag \
+  --hands 12 \
+  --formation-hands 4 \
+  --equity-samples 1 \
+  --output results/phase1/rule_smoke
+```
+
+Run the complete condition-matrix wiring smoke with one seed and short branches:
+
+```bash
+PYTHONPATH=src uv run python scripts/run_phase1_experiment.py \
+  --matrix-smoke \
+  --output results/phase1/matrix_smoke
+```
+
+Real-provider runs are intentionally opt-in. Validate a small zero-failure smoke before
+using `--preregistered`; the checked-in defaults and 10,000-call ceilings are documented
+in `configs/phase1.yaml`. The runner never silently substitutes a provider or model.
+
+### Resumable formal runs
+
+The formal executors checkpoint rule experiments per cell/seed and LLM experiments per
+model/job/paired-seed block. Completion is atomic. A provider ledger is written before
+and after every call, so an interrupted call is conservatively counted against the
+budget. Re-run the exact same command after `Ctrl-C`, process termination, or restart;
+completed blocks are verified and skipped. A changed plan or model configuration fails
+closed instead of mixing protocols.
+
+Formal execution requires a clean Git worktree. The plan freezes the Git commit and a
+content fingerprint of the experiment implementation. `--allow-dirty-worktree` exists
+only for bounded rehearsal runs; it is recorded in provenance and should not be used for
+confirmatory evidence.
+
+Start or resume the complete 40-cell, 60-seed rule matrix:
+
+```bash
+PYTHONPATH=src uv run python scripts/run_phase1_resumable.py simulation \
+  --output results/phase1/full_simulation
+```
+
+Start or resume the dual-model confirmation only after selecting the simulation winner:
+
+```bash
+PYTHONPATH=src uv run python scripts/run_phase1_resumable.py llm \
+  --selected-depth recursive_d2 \
+  --output results/phase1/llm_confirmation
+```
+
+Inspect progress without running new blocks:
+
+```bash
+PYTHONPATH=src uv run python scripts/run_phase1_resumable.py status \
+  --output results/phase1/full_simulation
+```
+
+Use `--max-seed-blocks`, `--max-cells`, or `--max-blocks` to bound one invocation;
+these controls do not change the frozen experimental plan. Incomplete `.running`
+directories are retained under an `interrupted/` directory and are never treated as
+evidence. LLM primary-call allocation is checked against a conservative per-block upper
+bound before a new block starts; unresolved failures, fallback, identity mismatch,
+unbalanced paired calls, or incomplete accounting invalidate that block.
+
 ## Evidence boundary
 
 The system stores model-provided concise audit summaries, not hidden chain-of-thought. The poker environment is a transparent research simulator with discretized betting and heuristic opponents; it is not a competitive poker solver.

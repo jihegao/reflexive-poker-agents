@@ -1,0 +1,48 @@
+# Phase 1 preregistration defaults. The CLI flags are the executable source of truth.
+protocol: reflexive-poker-phase1-v1
+evidence_layers:
+  simulation:
+    heads_up:
+      treatments: [state_only, history_statistics, action_prediction, strategy_type, recursive_d2, recursive_d3]
+      opponent_types: [rock, tag, lag, calling_station, myopic]
+      epsilon: [0.05, 0.35]
+      stability: [fixed, midpoint_shift]
+      seeds: {start: 9400, count: 60}
+      hands: 400
+      formation_hands: 100
+      boundary_cells:
+        adaptive: {base_types: [rock, tag, lag, calling_station, myopic], epsilon: [0.05, 0.35]}
+        approximate_equilibrium: {stability: fixed, epsilon: [0.05, 0.35]}
+    six_max:
+      treatments: [state_only, action_prediction, recursive_d2, recursive_d3]
+      compositions: [homogeneous_tag, heterogeneous_classic]
+      epsilon: [0.05, 0.35]
+      stability: [fixed, adaptive]
+      seeds: {start: 9600, count: 60}
+      hands: 400
+      formation_hands: 100
+  llm_confirmation:
+    models:
+      - provider: opencode-go
+        model: deepseek-v4-flash
+      - provider: codex
+        model: gpt-5.6-luna
+    max_calls_per_model: 10000
+    heads_up_contrast_calls: 8000
+    six_max_external_validation_calls: 1600
+    preflight_and_retry_reserve: 400
+provider_gate:
+  max_schema_retries_per_decision: 1
+  require_zero_unresolved_failures: true
+  require_zero_fallbacks: true
+  require_exact_model_identity: true
+  require_complete_token_accounting: true
+resumable_execution:
+  simulation_checkpoint: per_cell_and_seed
+  llm_checkpoint: per_model_job_and_paired_seed_block
+  provider_ledger_checkpoint: before_and_after_every_call
+  incomplete_directory_suffix: .running
+  interrupted_artifacts: retained_and_budget_accounted
+  resume_rule: rerun_the_exact_same_command
+  immutable_plan_hash: true
+  atomic_completion_marker: COMPLETED.json

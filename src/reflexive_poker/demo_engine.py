@@ -81,6 +81,7 @@ class DemoTable:
         self.config = config
         self.version = 0
         self.controller = "human"
+        self.opponent_controllers = ["rule_ai"] * 5
         self.controller_epoch = 0
         self.advice_enabled = False
         self.phase = "configuring"
@@ -207,8 +208,9 @@ class DemoTable:
             if self.hand.complete:
                 return
             actor = self.hand.actor
-            if actor == self.hero_seat:
-                self.phase = "waiting_human" if self.controller == "human" else "waiting_llm"
+            controller = self.controller_for(actor)
+            if controller in {"human", "llm_closed_loop"}:
+                self.phase = "waiting_human" if controller == "human" else "waiting_llm"
                 return
             self.phase = "running"
             decision = self._rule_decision(actor)
@@ -280,8 +282,9 @@ class DemoTable:
             environment_regime="stable",
         )
 
-    def decision_state(self) -> dict[str, Any]:
-        context = self._decision_context(self.hero_seat)
+    def decision_state(self, actor: int | None = None) -> dict[str, Any]:
+        actor = self.hero_seat if actor is None else actor
+        context = self._decision_context(actor)
         return {
             "task": "choose_poker_action",
             "hand_index": context.hand_index,
@@ -297,6 +300,7 @@ class DemoTable:
             "strategy": self.strategy,
             "recent_reflections": self.reflection_memory[-int(self.strategy["memoryHands"]) :],
             "public_actions": list(self.hand.actions if self.hand else []),
+            "controlled_seat": actor,
         }
 
     def _rule_decision(self, actor: int) -> Decision:
@@ -410,7 +414,7 @@ class DemoTable:
             "pot_before": _round_bb(pot_before),
             "active_players": sum(hand.active),
             "strategy_version": self.strategy["version"] if actor == self.hero_seat else None,
-            "controller": self.controller if actor == self.hero_seat else "rule_ai",
+            "controller": self.controller_for(actor),
         }
         hand.actions.append(event)
         self.last_advice = None
@@ -505,19 +509,43 @@ class DemoTable:
         )
 
     def set_controller(self, controller: str) -> None:
-        if controller not in {"human", "llm_closed_loop"}:
+        self.set_seat_controller(self.hero_seat, controller)
+
+    def controller_for(self, seat: int) -> str:
+        if seat == self.hero_seat:
+            return self.controller
+        if not 1 <= seat <= 5:
+            raise ValueError("invalid_seat")
+        return self.opponent_controllers[seat - 1]
+
+    def set_seat_controller(self, seat: int, controller: str) -> None:
+        allowed = {"human", "llm_closed_loop"} if seat == self.hero_seat else {
+            "rule_ai",
+            "llm_closed_loop",
+        }
+        if controller not in allowed:
             raise ValueError("invalid_controller")
-        if controller == self.controller:
+        if self.controller_for(seat) == controller:
+            self.paused_reason = None
             return
-        self.controller = controller
+        if seat == self.hero_seat:
+            self.controller = controller
+        else:
+            self.opponent_controllers[seat - 1] = controller
         self.controller_epoch += 1
         self.paused_reason = None
         self._emit(
-            "hero.controller_changed",
-            {"controller": controller, "controllerEpoch": self.controller_epoch},
+            "hero.controller_changed" if seat == self.hero_seat else "player.controller_changed",
+            {"seat": seat, "controller": controller, "controllerEpoch": self.controller_epoch},
         )
-        if self.hand and not self.hand.complete and self.hand.actor == self.hero_seat:
-            self.phase = "waiting_human" if controller == "human" else "waiting_llm"
+        if self.hand and not self.hand.complete and self.hand.actor == seat:
+            if controller == "human":
+                self.phase = "waiting_human"
+            elif controller == "llm_closed_loop":
+                self.phase = "waiting_llm"
+            else:
+                self.phase = "running"
+                self.advance_until_blocked()
 
     def set_advice_enabled(self, enabled: bool) -> None:
         self.advice_enabled = bool(enabled)
@@ -545,9 +573,13 @@ class DemoTable:
             },
         )
 
-    def record_advice(self, advice: dict[str, Any]) -> None:
-        self.last_advice = advice
-        self._emit("hero.advice_ready", {"advice": advice})
+    def record_advice(self, advice: dict[str, Any], *, actor: int = 0) -> None:
+        if actor == self.hero_seat:
+            self.last_advice = advice
+        self._emit(
+            "hero.advice_ready" if actor == self.hero_seat else "player.decision_ready",
+            {"seat": actor, "advice": advice},
+        )
 
     def record_reflection(self, reflection: dict[str, Any]) -> None:
         self.reflection_memory.append(reflection)
@@ -566,15 +598,24 @@ class DemoTable:
 
     def pause_for_provider_failure(self, reason: str) -> None:
         self.provider_usage["failures"] += 1
-        self.controller = "human"
-        self.controller_epoch += 1
-        self.phase = "hand_complete" if self.hand and self.hand.complete else "waiting_human"
+        current_controller = (
+            self.controller_for(self.hand.actor)
+            if self.hand and not self.hand.complete
+            else self.controller
+        )
+        self.phase = (
+            "hand_complete"
+            if self.hand and self.hand.complete
+            else "waiting_llm"
+            if current_controller == "llm_closed_loop"
+            else "waiting_human"
+        )
         self.paused_reason = reason
         self._emit(
             "llm.failed",
             {
                 "reason": reason,
-                "controller": "human",
+                "controller": current_controller,
                 "controllerEpoch": self.controller_epoch,
             },
         )
@@ -680,6 +721,7 @@ class DemoTable:
                         "cards": [card_to_str(card) for card in hand.holes[index]] if show_cards else [],
                         "isButton": index == hand.button,
                         "isActor": not hand.complete and index == hand.actor,
+                        "controller": self.controller_for(index),
                     }
                 )
             hand_data = {
@@ -719,6 +761,7 @@ class DemoTable:
             "ended": self.ended,
             "controller": self.controller,
             "controllerEpoch": self.controller_epoch,
+            "seatControllers": [self.controller_for(index) for index in range(6)],
             "adviceEnabled": self.advice_enabled,
             "pausedReason": self.paused_reason,
             "canAct": can_act,
@@ -740,6 +783,7 @@ class DemoTable:
             "config": asdict(self.config),
             "version": self.version,
             "controller": self.controller,
+            "opponent_controllers": self.opponent_controllers,
             "controller_epoch": self.controller_epoch,
             "advice_enabled": self.advice_enabled,
             "phase": self.phase,
@@ -760,6 +804,7 @@ class DemoTable:
         table = cls(DemoConfig(**config_value), table_id=value["table_id"], auto_start=False)
         table.version = int(value["version"])
         table.controller = value["controller"]
+        table.opponent_controllers = list(value.get("opponent_controllers", ["rule_ai"] * 5))
         table.controller_epoch = int(value["controller_epoch"])
         table.advice_enabled = bool(value["advice_enabled"])
         table.phase = value["phase"]

@@ -10,6 +10,7 @@ type Seat = {
   cards: string[];
   isButton: boolean;
   isActor: boolean;
+  controller: "human" | "rule_ai" | "llm_closed_loop";
 };
 
 type Strategy = {
@@ -137,7 +138,7 @@ function Setup({ onStart, busy }: { onStart: (opponents: string[], mode: string)
       <section className="setup-card">
         <p className="eyebrow">LOCAL PLAYABLE LAB · 6-MAX NLH</p>
         <h1>在牌桌上观察一个策略<br />如何认识并改写自己。</h1>
-        <p className="setup-lead">你控制 Hero。五位规则对手保持固定风格；只有 Hero 可以在真人与 closed-loop LLM agent 之间切换。</p>
+        <p className="setup-lead">你控制 Hero。进入牌桌后，Hero 和五位规则对手都可以按座位切换为 LLM agent。</p>
         <div className="setup-grid">
           <div>
             <h2>对手阵容</h2>
@@ -156,7 +157,7 @@ function Setup({ onStart, busy }: { onStart: (opponents: string[], mode: string)
               <b>Deterministic Mock</b><span>离线、可复现，验收默认</span>
             </button>
             <button className={`provider-choice ${mode === "live_aliyun" ? "selected" : ""}`} onClick={() => setMode("live_aliyun")}>
-              <b>Live · aliyun_99</b><span>固定 deepseek-v4-flash · 15s 超时</span>
+              <b>Live · aliyun_99</b><span>固定 deepseek-v4-flash · 60s 超时</span>
             </button>
             {mode === "live_aliyun" && <p className="live-warning">Live 会通过受限 SSH 使用远端已登录的 OpenCode CLI；不会启动公网 LLM 网关。</p>}
           </div>
@@ -207,7 +208,7 @@ function TableCenter({ state }: { state: TableState }) {
   );
 }
 
-function LeftRail({ state, events }: { state: TableState; events: LiveEvent[] }) {
+function LeftRail({ state, events, busy, command }: { state: TableState; events: LiveEvent[]; busy: boolean; command: (path: string, body?: unknown) => void }) {
   const hand = state.hand!;
   return (
     <aside className="rail left-rail">
@@ -217,13 +218,19 @@ function LeftRail({ state, events }: { state: TableState; events: LiveEvent[] })
         <div><span>STREET</span><b>{LABELS[hand.street]}</b></div>
         <div><span>TO CALL</span><b>{hand.toCallBb.toFixed(1)} BB</b></div>
       </div>
-      <div className="section-head">固定对手 <span>RULE AI</span></div>
+      <div className="section-head">其他 Agent <span>RULE / LLM</span></div>
       <div className="opponent-list">
         {hand.seats.slice(1).map((seat) => (
           <div className="opponent-item" key={seat.seat}>
             <i className={`type-dot type-${seat.strategy}`} />
-            <div><b>{LABELS[seat.strategy]}</b><span>Seat {seat.seat} · {seat.active ? "在局" : "已弃牌"}</span></div>
+            <div><b>{LABELS[seat.strategy]}</b><span>Seat {seat.seat} · {seat.controller === "llm_closed_loop" ? "LLM Agent" : "Rule AI"} · {seat.active ? "在局" : "已弃牌"}</span></div>
             <strong>{seat.stackBb.toFixed(0)}</strong>
+            <Switch
+              label={`切换 Seat ${seat.seat} 控制器`}
+              checked={seat.controller === "llm_closed_loop"}
+              disabled={busy || !state.owner}
+              onChange={() => command(`seats/${seat.seat}/controller`, { controller: seat.controller === "llm_closed_loop" ? "rule_ai" : "llm_closed_loop" })}
+            />
           </div>
         ))}
       </div>
@@ -248,7 +255,7 @@ function AgentRail({ state, busy, command }: { state: TableState; busy: boolean;
         <Switch label="切换 Hero 控制器" checked={state.controller === "llm_closed_loop"} disabled={busy || !state.owner} onChange={() => command("hero/controller", { controller: state.controller === "human" ? "llm_closed_loop" : "human" })} />
       </div>
       <div className="model-strip"><span>{state.providerMode === "mock" ? "MOCK" : "LIVE"}</span><b>{state.model}</b><i>{state.providerMode === "mock" ? state.providerUsage.mock_calls || 0 : `${state.liveCallBudget.used}/${state.liveCallBudget.limit}`}</i></div>
-      {state.pausedReason && <div className="failure-banner"><b>已交还 Human</b><span>{state.pausedReason}</span></div>}
+      {state.pausedReason && <div className="failure-banner"><b>LLM 已暂停，控制器保持不变</b><span>{state.pausedReason}</span></div>}
       <div className="advice-toggle">
         <div><b>LLM 行动建议</b><span>只读，不改写策略</span></div>
         <Switch label="切换 LLM 行动建议" checked={state.adviceEnabled} disabled={busy || state.controller !== "human" || !state.owner} onChange={() => command("hero/advice-toggle", { enabled: !state.adviceEnabled })} />
@@ -374,7 +381,7 @@ export default function App() {
         <div className="top-actions"><span className={state.owner ? "owner-badge" : "spectator-badge"}>{state.owner ? "OWNER SESSION" : "READ-ONLY"}</span><button onClick={() => void load(state.tableId)}>↻</button></div>
       </header>
       <div className="workspace">
-        <LeftRail state={state} events={events} />
+        <LeftRail state={state} events={events} busy={busy} command={command} />
         <TableCenter state={state} />
         <AgentRail state={state} busy={busy} command={command} />
       </div>

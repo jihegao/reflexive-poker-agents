@@ -14,7 +14,7 @@
 4. 在同一牌桌里查看动作、胜率、简短依据、对手模型和策略版本变化；
 5. 打完后比较“我的选择”和“LLM 行动”，或回看策略如何逐步调整。
 
-首版是**一个可切换控制权的 Hero Player 对五个固定规则对手**，不是接入第三方现金牌局。只有 Hero 可以连接 LLM；对手不能切换 LLM、不能自改策略。这样既展示闭环策略塑形，也保持实验边界清晰。共享观战、邀请好友占座属于后续多人房间能力。
+首版是**一个可切换控制权的 Hero Player 对五个可切换控制器的对手**，不是接入第三方现金牌局。Hero 可在 Human 与 LLM 间切换；其他座位可在冻结规则策略与 LLM agent 间切换。共享观战、邀请好友占座属于后续多人房间能力。
 
 ### 成功标准
 
@@ -190,9 +190,9 @@ stateDiagram-v2
 - 每个快照都有单调递增的 `version`；
 - 每个动作携带 `commandId` 和 `expectedVersion`，重复提交幂等，旧版本拒绝；
 - 发牌、权益采样和规则 AI 都从冻结 seed 派生；
-- AI 超时或返回非法动作时使用已有安全 fallback，并在 UI 中明确标注；
+- AI 超时或返回非法动作时暂停该 LLM 控制器，并在 UI 中明确标注；
 - 控制切换、策略 patch 和回滚都使用相同的版本检查与幂等规则；
-- 只有 Hero seat token 能切换控制或改变 Hero 策略；
+- 只有牌桌 owner 能切换各座位控制器或改变 Hero 策略；
 - 对手策略在建桌后冻结，不接受任何运行时 patch；
 - Human 思考期间 Demo 默认不设强制倒计时，公开多人房间才启用 server-side deadline。
 
@@ -341,7 +341,8 @@ LLM 每次只能返回 patch，不能替换完整对象：
 | `POST` | `/api/tables` | 创建并冻结牌桌配置 |
 | `GET` | `/api/tables/:id` | 获取 viewer 过滤后的当前快照 |
 | `POST` | `/api/tables/:id/actions` | 提交 Human 动作 |
-| `POST` | `/api/tables/:id/hero/controller` | 切换 Human / LLM 控制权 |
+| `POST` | `/api/tables/:id/hero/controller` | 切换 Hero 的 Human / LLM 控制权 |
+| `POST` | `/api/tables/:id/seats/:seat/controller` | 切换指定座位的 Rule AI / LLM 控制权 |
 | `POST` | `/api/tables/:id/hero/strategy` | 验证并应用或回滚 StrategyPatch |
 | `POST` | `/api/tables/:id/control` | 暂停、继续、单步或调速 |
 | `GET` | `/api/tables/:id/events` | WebSocket 升级和实时事件 |
@@ -395,14 +396,14 @@ MVP 不需要先引入 D1：
 
 ### 8.4 AI 决策
 
-对手始终在 TableRoom 内运行规则 AI。只有 Hero 的 `llm_closed_loop` controller 会触发外部 LLM：
+每个座位都在 TableRoom 内保留独立控制器；Hero 的 Human / LLM 和其他座位的 Rule AI / LLM 切换都由 owner 发起。任一座位的 `llm_closed_loop` controller 都会触发外部 LLM：
 
 1. TableRoom 持久化 `ai_pending`、snapshot version 和 deadline；
 2. Worker 调用批准的 provider，并要求同时返回 `decision` 和可选 `strategyPatch`；
 3. 结果带原 snapshot version、controller epoch 和 base strategy version 回写 TableRoom；
 4. TableRoom 先验证控制权与动作，再独立验证 patch；动作合法不代表 patch 合法；
 5. 合法动作可以执行而非法 patch 被拒绝，两者分别记录；
-6. 超时、非法或过期动作使用安全 fallback；过期 patch 永不应用。
+6. 超时、非法或过期动作暂停 delegation 但保留所选控制器；过期 patch 永不应用。
 
 Cloudflare Workers AI 可通过 binding 调用，但模型目录和能力会变化，实现时从 [Workers AI](https://developers.cloudflare.com/workers-ai/) 与 binding 文档动态选择模型，不在产品契约中写死未经验证的模型名。
 

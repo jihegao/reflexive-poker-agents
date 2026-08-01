@@ -49,7 +49,7 @@ button:disabled { opacity: .38; cursor: not-allowed !important; }
 .section-head { display: flex; justify-content: space-between; color: #a3b5af; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .section-head span { color: #536b65; font: 8px DM Mono; }
 .opponent-list { margin: 9px 0 22px; }
-.opponent-item { display: grid; grid-template-columns: 8px 1fr auto; align-items: center; gap: 9px; padding: 9px 2px; border-bottom: 1px solid rgba(151,193,179,.07); }
+.opponent-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto 34px; align-items: center; gap: 9px; padding: 9px 2px; border-bottom: 1px solid rgba(151,193,179,.07); }
 .opponent-item div { display: flex; flex-direction: column; }
 .opponent-item b { font-size: 10px; }.opponent-item span { color: #5f756f; font-size: 8px; margin-top: 2px; }
 .opponent-item strong { color: #91a39e; font: 9px DM Mono; }

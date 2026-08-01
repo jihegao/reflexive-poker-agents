@@ -13,6 +13,7 @@ from .equity import estimate_equity
 from .llm_player import DeterministicNarrativeProvider, OpenCodeGoProvider, ProviderResponse
 
 LIVE_MODEL = "deepseek-v4-flash"
+LLM_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix='poker-demo-') as directory:
     result = subprocess.run(
         ['opencode', 'run', '--pure', '--format', 'json', '--dir', directory,
          '--model', 'opencode-go/deepseek-v4-flash', prompt],
-        capture_output=True, text=True, timeout=14, check=False,
+        capture_output=True, text=True, timeout=60, check=False,
     )
 if result.returncode:
     sys.stderr.write(result.stderr[-1000:])
@@ -61,11 +62,11 @@ sys.stdout.write(result.stdout)
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=LLM_TIMEOUT_SECONDS,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("aliyun_99 provider timed out after 15 seconds") from exc
+        raise TimeoutError("aliyun_99 provider timed out after 60 seconds") from exc
     if result.returncode:
         detail = result.stderr.strip()[-500:] or "remote provider failed"
         raise RuntimeError(f"aliyun_99 provider failed: {detail}")
@@ -78,15 +79,16 @@ def provider_for(table: DemoTable):
     return DeterministicNarrativeProvider(seed=table.config.seed)
 
 
-def enriched_decision_state(table: DemoTable) -> dict[str, Any]:
+def enriched_decision_state(table: DemoTable, actor: int | None = None) -> dict[str, Any]:
     if table.hand is None:
         raise ValueError("no_active_hand")
-    state = table.decision_state()
+    actor = table.hero_seat if actor is None else actor
+    state = table.decision_state(actor)
     hand = table.hand
     board_count = (0, 3, 4, 5)[hand.street_index]
     rng = random.Random(table.config.seed * 65537 + hand.hand_index * 257 + len(hand.actions))
     equity = estimate_equity(
-        tuple(hand.holes[table.hero_seat]),
+        tuple(hand.holes[actor]),
         tuple(hand.board[:board_count]),
         max(1, sum(hand.active) - 1),
         rng,
@@ -94,13 +96,14 @@ def enriched_decision_state(table: DemoTable) -> dict[str, Any]:
     )
     pot = max(float(state["pot"]), 0.01)
     to_call = float(state["to_call"])
-    opponent_actions = [item for item in hand.actions if item["seat"] != table.hero_seat]
+    opponent_actions = [item for item in hand.actions if item["seat"] != actor]
     folds = sum(item["action"] == "fold" for item in opponent_actions)
     raises = sum(item["action"] == "raise" for item in opponent_actions)
-    hero_actions = [item for item in hand.actions if item["seat"] == table.hero_seat]
+    hero_actions = [item for item in hand.actions if item["seat"] == actor]
     hero_raises = sum(item["action"] == "raise" for item in hero_actions)
     recent_rewards = [
-        float(item["rewards"].get("hero", 0.0)) for item in table.completed_hands[-6:]
+        float(item["rewards"].get(table.names[actor], 0.0))
+        for item in table.completed_hands[-6:]
     ]
     state.update(
         {
@@ -120,8 +123,9 @@ def enriched_decision_state(table: DemoTable) -> dict[str, Any]:
     return state
 
 
-def decide(table: DemoTable) -> DemoDecision:
-    state = enriched_decision_state(table)
+def decide(table: DemoTable, actor: int | None = None) -> DemoDecision:
+    actor = table.hero_seat if actor is None else actor
+    state = enriched_decision_state(table, actor)
     response = provider_for(table).decide(state)
     payload = response.payload
     action = str(payload.get("action"))
@@ -138,7 +142,7 @@ def decide(table: DemoTable) -> DemoDecision:
         "riskFlags": [str(value)[:160] for value in payload.get("risk_flags", [])[:4]],
         "provider": response.provider,
         "model": response.model,
-        "readOnly": table.controller == "human",
+        "readOnly": table.controller_for(actor) == "human",
     }
     return DemoDecision(action, raise_scale, advice, response)
 

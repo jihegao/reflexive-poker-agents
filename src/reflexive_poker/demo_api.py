@@ -38,6 +38,10 @@ class ControllerRequest(BaseModel):
     controller: Literal["human", "llm_closed_loop"]
 
 
+class SeatControllerRequest(BaseModel):
+    controller: Literal["rule_ai", "llm_closed_loop"]
+
+
 class AdviceToggleRequest(BaseModel):
     enabled: bool
 
@@ -88,6 +92,7 @@ def create_app(
         return {
             "opponents": list(DEMO_OPPONENT_TYPES),
             "heroControllers": ["human", "llm_closed_loop"],
+            "opponentControllers": ["rule_ai", "llm_closed_loop"],
             "liveModel": "opencode-go/deepseek-v4-flash",
         }
 
@@ -160,6 +165,21 @@ def create_app(
     ) -> dict[str, object]:
         try:
             table = await service.advice_enabled(table_id, poker_demo_owner, body.enabled)
+            return service.snapshot(table, owner=True)
+        except DEMO_API_ERRORS as exc:
+            _raise_http(exc)
+
+    @app.post("/api/tables/{table_id}/seats/{seat}/controller")
+    async def seat_controller(
+        table_id: str,
+        seat: int,
+        body: SeatControllerRequest,
+        poker_demo_owner: str | None = Cookie(default=None),
+    ) -> dict[str, object]:
+        try:
+            table = await service.seat_controller(
+                table_id, poker_demo_owner, seat, body.controller
+            )
             return service.snapshot(table, owner=True)
         except DEMO_API_ERRORS as exc:
             _raise_http(exc)

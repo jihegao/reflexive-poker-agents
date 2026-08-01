@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .demo_engine import DemoConfig, DemoTable
-from .demo_llm import decide, reflect_and_patch
+from .demo_llm import LLM_TIMEOUT_SECONDS, decide, reflect_and_patch
 from .demo_store import DemoStore, owner_hash
 
 
@@ -95,11 +95,14 @@ class DemoService:
     async def action(
         self, table_id: str, token: str | None, action: str, raise_scale: float
     ) -> DemoTable:
-        return await self._mutate(
+        table = await self._mutate(
             table_id,
             token,
             lambda table: table.apply_action(table.hero_seat, action, raise_scale),
         )
+        await self.drive_llm(table_id)
+        table, _ = self._load(table_id)
+        return table
 
     async def controller(
         self, table_id: str, token: str | None, controller: str
@@ -112,6 +115,16 @@ class DemoService:
             table, _ = self._load(table_id)
         return table
 
+    async def seat_controller(
+        self, table_id: str, token: str | None, seat: int, controller: str
+    ) -> DemoTable:
+        table = await self._mutate(
+            table_id, token, lambda value: value.set_seat_controller(seat, controller)
+        )
+        await self.drive_llm(table_id)
+        table, _ = self._load(table_id)
+        return table
+
     async def advice_enabled(
         self, table_id: str, token: str | None, enabled: bool
     ) -> DemoTable:
@@ -121,9 +134,8 @@ class DemoService:
 
     async def next_hand(self, table_id: str, token: str | None) -> DemoTable:
         table = await self._mutate(table_id, token, lambda value: value.start_hand())
-        if table.controller == "llm_closed_loop":
-            await self.drive_llm(table_id)
-            table, _ = self._load(table_id)
+        await self.drive_llm(table_id)
+        table, _ = self._load(table_id)
         return table
 
     async def finish(self, table_id: str, token: str | None) -> DemoTable:
@@ -144,7 +156,9 @@ class DemoService:
                 self.store.save(table, stored_hash)
                 return table
         try:
-            result = await asyncio.wait_for(asyncio.to_thread(decide, table), timeout=15.2)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(decide, table), timeout=LLM_TIMEOUT_SECONDS
+            )
         except Exception as exc:  # noqa: BLE001 - provider boundary must hand control back
             async with self._locks[table_id]:
                 current, stored_hash = self._load(table_id)
@@ -182,8 +196,6 @@ class DemoService:
             while True:
                 async with self._locks[table_id]:
                     table, stored_hash = self._load(table_id)
-                    if table.controller != "llm_closed_loop":
-                        return
                     if table.hand is None:
                         return
                     if table.hand.complete:
@@ -198,7 +210,10 @@ class DemoService:
                         if already_reflected:
                             return
                         purpose = "reflection"
-                    elif table.phase == "waiting_llm" and table.hand.actor == table.hero_seat:
+                    elif (
+                        table.phase == "waiting_llm"
+                        and table.controller_for(table.hand.actor) == "llm_closed_loop"
+                    ):
                         purpose = "action"
                     else:
                         return
@@ -206,16 +221,24 @@ class DemoService:
                         table.pause_for_provider_failure("live_call_budget_exhausted")
                         self.store.save(table, stored_hash)
                         return
-                    captured = (table.version, table.controller_epoch, table.hand.hand_index)
+                    actor = table.hero_seat if purpose == "reflection" else table.hand.actor
+                    captured = (
+                        table.version,
+                        table.controller_epoch,
+                        table.hand.hand_index,
+                        table.hand.actor,
+                    )
                     mode = table.config.provider_mode
                 try:
                     if purpose == "action":
                         result = await asyncio.wait_for(
-                            asyncio.to_thread(decide, table), timeout=15.2
+                            asyncio.to_thread(decide, table, actor),
+                            timeout=LLM_TIMEOUT_SECONDS,
                         )
                     else:
                         result = await asyncio.wait_for(
-                            asyncio.to_thread(reflect_and_patch, table), timeout=15.2
+                            asyncio.to_thread(reflect_and_patch, table),
+                            timeout=LLM_TIMEOUT_SECONDS,
                         )
                 except Exception as exc:  # noqa: BLE001 - provider boundary must hand control back
                     async with self._locks[table_id]:
@@ -231,18 +254,20 @@ class DemoService:
                         current.version,
                         current.controller_epoch,
                         current.hand.hand_index if current.hand else -1,
+                        current.hand.actor if current.hand else -1,
                     )
-                    if current_key != captured or current.controller != "llm_closed_loop":
+                    if (
+                        current_key != captured
+                        or current.controller_for(actor) != "llm_closed_loop"
+                    ):
                         current.record_stale_llm_response(purpose)
                         self.store.save(current, stored_hash)
                         return
                     try:
                         current.record_provider_call(result.response, purpose=purpose)
                         if purpose == "action":
-                            current.record_advice(result.advice)
-                            current.apply_action(
-                                current.hero_seat, result.action, result.raise_scale
-                            )
+                            current.record_advice(result.advice, actor=actor)
+                            current.apply_action(actor, result.action, result.raise_scale)
                         else:
                             current.record_reflection(result.reflection)
                             current.apply_strategy_patch(result.patch)

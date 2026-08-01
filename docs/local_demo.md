@@ -21,11 +21,13 @@ OpenCode CLI over the restricted SSH alias and fixes the model to
 
 ## Frozen behavior
 
-- Only Hero switches between `Human Player` and `LLM Agent` using the
-  `closed_loop_shaper` strategy.
+- Hero switches between `Human Player` and `LLM Agent`; each of the other five
+  seats can independently switch between its frozen rule strategy and an LLM
+  controller.
 - Switching back to Human invalidates an in-flight LLM result. Provider errors,
-  validation errors, the 15-second timeout, or the 200-call live budget also
-  pause delegation and return control to Human without a fallback action.
+  validation errors, the 60-second timeout, or the 200-call live budget pause
+  delegation without silently changing the selected controller or taking a
+  fallback action.
 - Human advice is read-only. It can observe public actions, but it never writes
   a strategy patch.
 - Strategy changes are bounded, LLM-authored, post-hand patches. The player can

@@ -74,3 +74,38 @@ def test_only_llm_authored_bounded_strategy_patch_is_accepted() -> None:
         assert str(exc) == "invalid_strategy_patch_author"
     else:
         raise AssertionError("player-authored patch should be rejected")
+
+
+def test_opponent_controller_can_switch_to_llm_and_blocks_on_its_turn() -> None:
+    table = DemoTable(DemoConfig(seed=9200, equity_samples=2))
+    table.set_seat_controller(1, "llm_closed_loop")
+
+    table.apply_action(table.hero_seat, "check_call")
+
+    assert table.hand is not None
+    assert table.hand.actor == 1
+    assert table.phase == "waiting_llm"
+    assert table.snapshot()["hand"]["seats"][1]["controller"] == "llm_closed_loop"
+
+
+def test_provider_failure_keeps_selected_llm_controller() -> None:
+    table = DemoTable(DemoConfig(equity_samples=2))
+    table.set_controller("llm_closed_loop")
+
+    table.pause_for_provider_failure("action_timeout_mock")
+
+    assert table.controller == "llm_closed_loop"
+    assert table.phase == "waiting_llm"
+    assert table.paused_reason == "action_timeout_mock"
+
+
+def test_switching_current_opponent_back_to_rule_ai_resumes_table() -> None:
+    table = DemoTable(DemoConfig(seed=9200, equity_samples=2))
+    table.set_seat_controller(1, "llm_closed_loop")
+    table.apply_action(table.hero_seat, "check_call")
+    assert table.hand is not None and table.hand.actor == 1
+
+    table.set_seat_controller(1, "rule_ai")
+
+    assert table.controller_for(1) == "rule_ai"
+    assert not (table.hand.actor == 1 and table.phase == "waiting_llm")

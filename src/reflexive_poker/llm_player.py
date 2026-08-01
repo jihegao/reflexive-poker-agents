@@ -78,6 +78,7 @@ class ProviderResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    cost_usd: float | None = None
     response_id: str | None = None
 
 
@@ -177,7 +178,8 @@ class OpenAIResponsesProvider:
                 "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
                 f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
                 "odds rather than inventing card probabilities. Return a concise audit rationale, "
-                "assumptions, opponent model, self-model, risk flags, and next-step plan. Do not "
+                "assumptions, opponent model, self-model, risk flags, and next-step plan. A "
+                "raise_scale of 1.25 means all-in. Do not "
                 "produce hidden chain-of-thought or long private deliberation."
             ),
             state=state,
@@ -215,18 +217,32 @@ class OpenCodeGoProvider:
         self.run = run or self._run
 
     def _run(self, prompt: str) -> str:
-        try:
-            completed = subprocess.run(
-                [self.command, "run", "--model", f"opencode-go/{self.model}", prompt],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError("`opencode` CLI is required for the opencode-go provider.") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("OpenCode Go request timed out after 180 seconds.") from exc
+        with tempfile.TemporaryDirectory(prefix="reflexive-poker-opencode-") as directory:
+            try:
+                completed = subprocess.run(
+                    [
+                        self.command,
+                        "run",
+                        "--pure",
+                        "--format",
+                        "json",
+                        "--dir",
+                        directory,
+                        "--model",
+                        f"opencode-go/{self.model}",
+                        prompt,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    "`opencode` CLI is required for the opencode-go provider."
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("OpenCode Go request timed out after 180 seconds.") from exc
         if completed.returncode != 0:
             raise RuntimeError(f"OpenCode Go request failed: {completed.stderr[-500:]}")
         return completed.stdout
@@ -244,6 +260,42 @@ class OpenCodeGoProvider:
             if isinstance(payload, dict):
                 return payload
         raise ValueError("OpenCode Go response did not contain a JSON object.")
+
+    @classmethod
+    def _result(
+        cls, output: str
+    ) -> tuple[dict[str, Any], dict[str, int | None], float | None, str | None]:
+        final_text: str | None = None
+        response_id: str | None = None
+        cost_usd: float | None = None
+        usage: dict[str, int | None] = {"input": None, "output": None, "total": None}
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            response_id = event.get("sessionID") or response_id
+            if event.get("type") == "text":
+                part = event.get("part", {})
+                if isinstance(part.get("text"), str):
+                    final_text = part["text"]
+            if event.get("type") == "step_finish":
+                part = event.get("part", {})
+                tokens = part.get("tokens", {})
+                usage = {
+                    "input": tokens.get("input"),
+                    "output": tokens.get("output"),
+                    "total": tokens.get("total"),
+                }
+                reported_cost = part.get("cost")
+                if isinstance(reported_cost, int | float):
+                    cost_usd = float(reported_cost)
+        if final_text is None:
+            return cls._json_output(output), usage, cost_usd, response_id
+        payload = cls._json_output(final_text)
+        return payload, usage, cost_usd, response_id
 
     def _call(
         self,
@@ -265,12 +317,17 @@ class OpenCodeGoProvider:
         started = time.perf_counter()
         output = self.run(prompt)
         latency_ms = 1000.0 * (time.perf_counter() - started)
+        payload, usage, cost_usd, response_id = self._result(output)
         return ProviderResponse(
-            payload=self._json_output(output),
+            payload=payload,
             provider=self.name,
             model=self.model,
             latency_ms=latency_ms,
-            response_id=None,
+            input_tokens=usage["input"],
+            output_tokens=usage["output"],
+            total_tokens=usage["total"],
+            cost_usd=cost_usd,
+            response_id=response_id,
         )
 
     def decide(self, state: dict[str, Any]) -> ProviderResponse:
@@ -279,7 +336,8 @@ class OpenCodeGoProvider:
             instructions=(
                 "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
                 f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
-                "odds rather than inventing card probabilities. Return concise audit fields only."
+                "odds rather than inventing card probabilities. A raise_scale of 1.25 means "
+                "all-in. Return concise audit fields only."
             ),
             state=state,
             schema_name="poker_decision",
@@ -322,8 +380,13 @@ class CodexProvider:
                 self.command,
                 "exec",
                 "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
+                "--cd",
+                directory,
                 "--json",
                 "--color",
                 "never",
@@ -413,7 +476,8 @@ class CodexProvider:
             instructions=(
                 "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
                 f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
-                "odds rather than inventing card probabilities. Return concise audit fields only."
+                "odds rather than inventing card probabilities. A raise_scale of 1.25 means "
+                "all-in. Return concise audit fields only."
             ),
             state=state,
             schema=DECISION_SCHEMA,
@@ -454,7 +518,7 @@ class DeterministicNarrativeProvider:
         started = time.perf_counter()
         equity = float(state["equity_estimate"])
         pot_odds = float(state["pot_odds"])
-        fold_prob = float(state["predicted_all_fold"])
+        fold_prob = float(state.get("predicted_all_fold", 0.5))
         to_call = float(state["to_call"])
         legal = set(state["legal_actions"])
         rng = self._rng(state, 11)
@@ -611,10 +675,13 @@ class LLMPlayer(PokerAgent):
         *,
         opponents: tuple[str, ...] = (),
         memory_hands: int | None = None,
+        reflexive_enabled: bool = True,
     ) -> None:
         super().__init__(name, seed, style)
         self.opponents = opponents
         self.provider = provider
+        self.reflexive_enabled = reflexive_enabled
+        self.condition = "llm_reflexive_on" if reflexive_enabled else "llm_reflexive_off"
         self.depth_controller = AdaptiveDepthController(opponents)
         self.trace_dir = trace_dir
         self.reflection_memory_size = memory_hands or reflection_memory_size
@@ -680,8 +747,9 @@ class LLMPlayer(PokerAgent):
             if self.recent_rewards
             else 0.0
         )
-        return {
+        state = {
             "task": "choose_poker_action",
+            "reasoning_mode": "second_order" if self.reflexive_enabled else "first_order",
             "hand_index": context.hand_index,
             "street": context.street.value,
             "hole_cards": cards_to_str(context.hole_cards),
@@ -694,15 +762,29 @@ class LLMPlayer(PokerAgent):
             "legal_actions": [action.value for action in context.legal_actions],
             "equity_estimate": equity,
             "pot_odds": self._pot_odds(context),
-            "predicted_all_fold": prediction.all_fold_probability,
-            "reasoning_depth": depth,
-            "self_image_estimate": self._estimated_self_image(),
-            "opponent_aggression_mean": opponent_aggression,
-            "opponent_fold_mean": opponent_fold,
-            "recent_reward_mean": recent_reward_mean,
-            "recent_reflections": self.recent_reflections[-self.reflection_memory_size :],
             "public_history": [],
         }
+        if self.reflexive_enabled:
+            state.update(
+                {
+                    "predicted_all_fold": prediction.all_fold_probability,
+                    "reflexive_tools": {
+                        "multiway_equity": equity,
+                        "pot_odds": self._pot_odds(context),
+                        "self_public_image": self._estimated_self_image(),
+                        "opponent_aggression_mean": opponent_aggression,
+                        "opponent_fold_mean": opponent_fold,
+                        "all_opponents_fold_probability": prediction.all_fold_probability,
+                    },
+                    "reasoning_depth": depth,
+                    "self_image_estimate": self._estimated_self_image(),
+                    "opponent_aggression_mean": opponent_aggression,
+                    "opponent_fold_mean": opponent_fold,
+                    "recent_reward_mean": recent_reward_mean,
+                    "recent_reflections": self.recent_reflections[-self.reflection_memory_size :],
+                }
+            )
+        return state
 
     @staticmethod
     def _decision_from_payload(
@@ -797,6 +879,7 @@ class LLMPlayer(PokerAgent):
             "input_tokens": provider_response.input_tokens if provider_response else None,
             "output_tokens": provider_response.output_tokens if provider_response else None,
             "total_tokens": provider_response.total_tokens if provider_response else None,
+            "cost_usd": provider_response.cost_usd if provider_response else None,
             "response_id": provider_response.response_id if provider_response else None,
         }
         trace["final_action"] = decision.action.value
@@ -813,6 +896,7 @@ class LLMPlayer(PokerAgent):
         decisions = self._hand_decisions.pop(record.hand_index, [])
         state = {
             "task": "reflect_on_completed_hand",
+            "reasoning_mode": "second_order" if self.reflexive_enabled else "first_order",
             "hand_index": record.hand_index,
             "community_cards": cards_to_str(record.board),
             "showdown": record.showdown,
@@ -870,6 +954,7 @@ class LLMPlayer(PokerAgent):
             "input_tokens": response.input_tokens if response else None,
             "output_tokens": response.output_tokens if response else None,
             "total_tokens": response.total_tokens if response else None,
+            "cost_usd": response.cost_usd if response else None,
             "response_id": response.response_id if response else None,
             "error": error,
         }
@@ -895,5 +980,6 @@ class LLMPlayer(PokerAgent):
             "reflection_trace_count": len(self.reflection_traces),
             "provider_failures": self.provider_failures,
             "illegal_action_count": self.illegal_action_count,
+            "self_public_image": self._estimated_self_image(),
             "recent_reflections": self.recent_reflections[-3:],
         }

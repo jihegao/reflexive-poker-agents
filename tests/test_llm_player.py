@@ -100,6 +100,27 @@ def test_opencode_go_provider_uses_local_cli_with_schema_prompt() -> None:
     assert '"legal_actions": ["check_call"]' in prompt
 
 
+def test_opencode_go_provider_parses_json_events_usage_and_cost() -> None:
+    from reflexive_poker.llm_player import OpenCodeGoProvider
+
+    def run(_prompt):
+        return "\n".join(
+            [
+                '{"type":"text","sessionID":"ses_test","part":{"text":"```json\\n'
+                + _FakeResponse.output_text.replace('"', '\\"')
+                + '\\n``` trailing text"}}',
+                '{"type":"step_finish","sessionID":"ses_test","part":{"tokens":{"input":12,"output":8,"total":21},"cost":0.0012}}',
+            ]
+        )
+
+    response = OpenCodeGoProvider(run=run).decide(
+        {"legal_actions": ["check_call"], "hand_index": 0}
+    )
+    assert response.total_tokens == 21
+    assert response.cost_usd == 0.0012
+    assert response.response_id == "ses_test"
+
+
 def test_codex_provider_parses_json_events_and_usage() -> None:
     from reflexive_poker.llm_player import DECISION_SCHEMA, CodexProvider
 
@@ -111,7 +132,9 @@ def test_codex_provider_parses_json_events_and_usage() -> None:
         return "\n".join(
             [
                 '{"type":"thread.started"}',
-                '{"type":"item.completed","item":{"type":"agent_message","text":"' + _FakeResponse.output_text.replace('"', '\\"') + '"}}',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"'
+                + _FakeResponse.output_text.replace('"', '\\"')
+                + '"}}',
                 '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":8}}',
             ]
         )

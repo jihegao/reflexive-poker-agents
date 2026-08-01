@@ -206,6 +206,22 @@ class CallingStationAgent(PokerAgent):
         return {**super().snapshot(), "player_type": self.condition, "phase": "fixed"}
 
 
+class MyopicControlAgent(PokerAgent):
+    """Card-and-pot-odds control without opponent-image adjustment."""
+
+    condition = "myopic"
+
+    def act(self, context: DecisionContext) -> Decision:
+        return self._policy(
+            context,
+            reasoning_depth=0,
+            metadata={"player_type": self.condition, "phase": "fixed"},
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        return {**super().snapshot(), "player_type": self.condition, "phase": "fixed"}
+
+
 def sampled_style(player_type: str, seed: int, equity_samples: int) -> AgentStyle:
     """Generate a seed-specific instance within a narrow, pre-frozen type envelope."""
     spec = BASE_SPECS[player_type]
@@ -237,6 +253,8 @@ def make_tournament_agent(
         return TypedPolicyAgent(name, seed, player_type, style)
     if player_type == "calling_station":
         return CallingStationAgent(name, seed, style)
+    if player_type == "myopic":
+        return MyopicControlAgent(name, seed, style)
     # The generic policy remains available for the research controls whose richer
     # image-model implementations are not part of this compact release.
     return TypedPolicyAgent(name, seed, player_type, style)

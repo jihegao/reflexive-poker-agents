@@ -1,0 +1,3 @@
+provider,model,seed,hands_per_condition,chips_per_100_off,chips_per_100_on,chips_per_100_delta,net_chip_delta,decision_calls,reflection_calls,total_calls,input_tokens,output_tokens,total_tokens,reported_cost_usd,mean_latency_ms,provider_failures,fallbacks,source
+opencode-go,deepseek-v4-flash,9200,6,91.6666666667,116.6666666667,25.0,1.5,24,12,36,437207,11741,513366,0.07011494,16636.351639,0,0,results/second_order/deepseek_clean_serial_v2_seed9200
+codex,gpt-5.6-luna,9200,6,16.6666666667,16.6666666667,0.0,0.0,22,12,34,502870,10206,513076,,20012.036174,0,0,results/second_order/low_cost_live_pilot_seed9200/codex__gpt-5_6-luna__*

@@ -22,15 +22,15 @@ class EnvironmentConfig:
     starting_stack: float = 100.0
     small_blind: float = 0.5
     big_blind: float = 1.0
-    max_raises_per_street: int = 2
+    max_raises_per_street: int | None = 2
     regime_switch_hand: int = 120
 
 
 class HoldemEnvironment:
-    """A reproducible, discretized multi-player Texas Hold'em environment.
+    """A reproducible multi-player Texas Hold'em environment.
 
-    Cards, blinds, four streets, folding and showdown are standard. Bet sizing is
-    discretized and raises are capped to keep experiments fast and interpretable.
+    Cards, blinds, four streets, folding, side pots, and showdown are standard.
+    Set ``max_raises_per_street=None`` for an uncapped no-limit betting experiment.
     """
 
     def __init__(
@@ -50,7 +50,8 @@ class HoldemEnvironment:
         return "stable" if hand_index < self.config.regime_switch_hand else "shifted"
 
     def play(self, hands: int) -> list[HandRecord]:
-        for hand_index in range(hands):
+        start_hand = len(self.records)
+        for hand_index in range(start_hand, start_hand + hands):
             self.records.append(self.play_hand(hand_index))
         return self.records
 
@@ -109,20 +110,15 @@ class HoldemEnvironment:
                 actions=actions,
             )
 
-        pot = sum(total_contrib)
         live_indices = [idx for idx, is_active in enumerate(active) if is_active]
         showdown = len(live_indices) > 1
         if len(live_indices) == 1:
-            winners = live_indices
+            ranks: dict[int, tuple[int, ...]] = {}
         else:
             ranks = {
                 idx: best_hand_rank((*holes[self.agents[idx].name], *board)) for idx in live_indices
             }
-            best = max(ranks.values())
-            winners = [idx for idx, hand_rank in ranks.items() if hand_rank == best]
-        share = pot / len(winners)
-        for idx in winners:
-            stacks[idx] += share
+        winners = self._award_pots(stacks, total_contrib, live_indices, ranks)
         rewards = {
             agent.name: stacks[idx] - self.config.starting_stack
             for idx, agent in enumerate(self.agents)
@@ -146,6 +142,37 @@ class HoldemEnvironment:
             agent.on_hand_end(record)
         return record
 
+    @staticmethod
+    def _award_pots(
+        stacks: list[float],
+        total_contrib: list[float],
+        live_indices: list[int],
+        ranks: dict[int, tuple[int, ...]],
+    ) -> list[int]:
+        """Award the main pot and any side pots from total hand contributions."""
+        awarded: list[int] = []
+        previous_level = 0.0
+        for level in sorted({contribution for contribution in total_contrib if contribution > 0.0}):
+            contributors = [
+                idx for idx, contribution in enumerate(total_contrib) if contribution >= level
+            ]
+            pot = (level - previous_level) * len(contributors)
+            eligible = [idx for idx in live_indices if total_contrib[idx] >= level]
+            if not eligible:
+                previous_level = level
+                continue
+            if len(eligible) == 1:
+                winners = eligible
+            else:
+                best_rank = max(ranks[idx] for idx in eligible)
+                winners = [idx for idx in eligible if ranks[idx] == best_rank]
+            share = pot / len(winners)
+            for idx in winners:
+                stacks[idx] += share
+            awarded.extend(winners)
+            previous_level = level
+        return sorted(set(awarded))
+
     def _betting_round(
         self,
         *,
@@ -167,6 +194,7 @@ class HoldemEnvironment:
         pending = {idx for idx in range(n) if active[idx] and not all_in[idx]}
         actor = start
         raises = 0
+        last_full_raise_increment = self.config.big_blind
         last_raiser: int | None = None
         guard = 0
 
@@ -182,10 +210,12 @@ class HoldemEnvironment:
             legal: list[ActionType] = [ActionType.CHECK_CALL]
             if to_call > 1e-9:
                 legal.insert(0, ActionType.FOLD)
-            min_raise_increment = max(self.config.big_blind, 0.45 * max(sum(total_contrib), 1.0))
             can_raise = (
-                raises < self.config.max_raises_per_street
-                and stacks[actor] > to_call + min_raise_increment
+                (
+                    self.config.max_raises_per_street is None
+                    or raises < self.config.max_raises_per_street
+                )
+                and stacks[actor] >= to_call + last_full_raise_increment
                 and sum(active) > 1
             )
             if can_raise:
@@ -237,8 +267,12 @@ class HoldemEnvironment:
                 call_paid = self._pay(actor, to_call, stacks, total_contrib)
                 street_contrib[actor] += call_paid
                 pot_after_call = sum(total_contrib)
-                increment = max(
-                    self.config.big_blind, decision.raise_scale * max(pot_after_call, 1.0)
+                increment = (
+                    stacks[actor]
+                    if decision.raise_scale >= 1.20
+                    else max(
+                        last_full_raise_increment, decision.raise_scale * max(pot_after_call, 1.0)
+                    )
                 )
                 raise_paid = self._pay(actor, increment, stacks, total_contrib)
                 street_contrib[actor] += raise_paid
@@ -246,6 +280,7 @@ class HoldemEnvironment:
                 current_bet = street_contrib[actor]
                 last_raiser = actor
                 raises += 1
+                last_full_raise_increment = raise_paid
                 if stacks[actor] <= 1e-9:
                     all_in[actor] = True
                 pending = {

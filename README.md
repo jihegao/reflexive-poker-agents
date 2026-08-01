@@ -85,6 +85,29 @@ PYTHONPATH=src python scripts/run_llm_player_evaluation.py \
 
 This uses the local Codex login and emits per-turn token accounting in the traces.
 
+## Run the paired six-max second-order experiment
+
+The six-max cash-game experiment pairs identical deck seeds, seats, 100 BB resets,
+and five heuristic opponents. `reflexive_off` receives only first-order poker state;
+`reflexive_on` additionally receives public self-image, opponent summaries, collective
+fold probability, and prior reflections.
+
+```bash
+PYTHONPATH=src python scripts/run_second_order_experiment.py \
+  --seed-start 9200 \
+  --seed-count 1 \
+  --hands 6 \
+  --equity-samples 64 \
+  --workers 1 \
+  --models opencode-go:deepseek-v4-flash codex:gpt-5.6-luna \
+  --output results/second_order/low_cost_pilot
+```
+
+Use `--workers 1` for the clean provider gate. A one-seed, six-hand run validates
+the intervention and accounting only; it cannot establish a profitability advantage.
+The checked-in clean pilot report is under
+`results/second_order/low_cost_clean_pilot_seed9200/`.
+
 ## Earlier experiments
 
 The repository also contains the situated-reflection, image-shaping, and player-type matchup environments used in earlier project phases. These experiments consistently separate mechanism claims from poker-profit claims: improved self-model fidelity or belief control does not by itself establish higher reward.

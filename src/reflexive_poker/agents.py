@@ -122,4 +122,10 @@ class PokerAgent:
         self.observe_hand_end(record)
 
     def snapshot(self) -> dict[str, Any]:
-        return {"condition": self.condition, "cumulative_reward": self.cumulative_reward}
+        return {
+            "condition": self.condition,
+            "cumulative_reward": self.cumulative_reward,
+            "belief_aggression": {
+                name: belief.aggression.mean for name, belief in self.beliefs.items()
+            },
+        }

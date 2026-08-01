@@ -109,3 +109,91 @@ def test_switching_current_opponent_back_to_rule_ai_resumes_table() -> None:
 
     assert table.controller_for(1) == "rule_ai"
     assert not (table.hand.actor == 1 and table.phase == "waiting_llm")
+
+
+def test_each_seat_model_is_persisted_and_exposed_in_snapshots() -> None:
+    table = DemoTable(DemoConfig(equity_samples=2))
+    table.set_seat_model(0, "qwen3.7-plus")
+    table.set_seat_model(3, "opencode-go/kimi-k2.7-code")
+
+    restored = DemoTable.from_dict(table.to_dict())
+    seats = restored.snapshot()["hand"]["seats"]
+
+    assert restored.model_for(0) == "qwen3.7-plus"
+    assert restored.model_for(3) == "kimi-k2.7-code"
+    assert seats[0]["model"] == "qwen3.7-plus"
+    assert seats[3]["model"] == "kimi-k2.7-code"
+
+
+def test_each_seat_has_an_independent_persona_strategy_and_memory() -> None:
+    table = DemoTable(DemoConfig(equity_samples=2))
+
+    assert [table.strategy_for(seat)["basePersona"] for seat in range(6)] == [
+        "closed_loop_shaper",
+        "tag",
+        "lag",
+        "rock",
+        "calling_station",
+        "myopic",
+    ]
+    hero_before = dict(table.strategy_for(0))
+    seat_one = table.apply_strategy_patch(
+        {
+            "patchId": "patch_seat_one",
+            "baseStrategyVersion": 1,
+            "author": "llm_closed_loop",
+            "reason": "tighten the TAG response",
+            "changes": {"aggressionBias": 0.08, "notes": ["seat one only"]},
+        },
+        actor=1,
+    )
+    table.record_reflection(
+        {"handIndex": 0, "outcomeSummary": "seat one review"}, actor=1
+    )
+
+    assert seat_one["version"] == 2
+    assert seat_one["basePersona"] == "tag"
+    assert table.strategy_for(0) == hero_before
+    assert table.reflection_memory_for(0) == []
+    assert table.reflection_memory_for(1)[0]["seat"] == 1
+
+    restored = DemoTable.from_dict(table.to_dict())
+    assert restored.strategy_for(1) == seat_one
+    assert restored.reflection_memory_for(1) == table.reflection_memory_for(1)
+    assert restored.snapshot()["hand"]["seats"][1]["strategyProfile"] == seat_one
+
+
+def test_old_table_payload_gets_default_opponent_strategy_profiles() -> None:
+    table = DemoTable(DemoConfig(equity_samples=2))
+    payload = table.to_dict()
+    payload.pop("opponent_strategy_versions")
+    payload.pop("opponent_reflection_memories")
+    for strategy in payload["strategy_versions"]:
+        strategy.pop("strategyId", None)
+        strategy.pop("basePersona", None)
+
+    restored = DemoTable.from_dict(payload)
+
+    assert restored.strategy_for(0)["basePersona"] == "closed_loop_shaper"
+    assert restored.strategy_for(1)["basePersona"] == "tag"
+    assert restored.strategy_for(5)["basePersona"] == "myopic"
+    assert restored.reflection_memory_for(1) == []
+
+
+def test_completed_hand_queues_reflection_for_each_llm_seat_that_acted() -> None:
+    table = DemoTable(DemoConfig(seed=9200, equity_samples=2))
+    table.set_seat_controller(0, "llm_closed_loop")
+    table.set_seat_controller(1, "llm_closed_loop")
+    assert table.hand is not None
+    table.hand.actions.extend(
+        [
+            {"seat": 1, "controller": "llm_closed_loop"},
+            {"seat": 0, "controller": "llm_closed_loop"},
+            {"seat": 2, "controller": "rule_ai"},
+        ]
+    )
+    table.hand.complete = True
+
+    assert table.pending_reflection_seats() == [0, 1]
+    table.record_reflection({"handIndex": 0, "outcomeSummary": "hero"}, actor=0)
+    assert table.pending_reflection_seats() == [1]

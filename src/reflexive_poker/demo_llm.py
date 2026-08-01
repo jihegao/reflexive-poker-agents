@@ -8,12 +8,27 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from .demo_engine import RAISE_SCALES, DemoTable
+from .demo_engine import DEFAULT_LLM_MODEL, RAISE_SCALES, DemoTable
 from .equity import estimate_equity
 from .llm_player import DeterministicNarrativeProvider, OpenCodeGoProvider, ProviderResponse
 
-LIVE_MODEL = "deepseek-v4-flash"
 LLM_TIMEOUT_SECONDS = 60
+MODEL_LIST_TIMEOUT_SECONDS = 10
+FALLBACK_OPENCODE_GO_MODELS = (
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "glm-5.1",
+    "glm-5.2",
+    "kimi-k2.6",
+    "kimi-k2.7-code",
+    "mimo-v2.5",
+    "mimo-v2.5-pro",
+    "minimax-m2.7",
+    "minimax-m3",
+    "qwen3.6-plus",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+)
 
 
 @dataclass(frozen=True)
@@ -31,14 +46,49 @@ class DemoReflection:
     response: ProviderResponse
 
 
-def _aliyun_runner(prompt: str) -> str:
-    remote_script = """
+def list_opencode_go_models() -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "aliyun_99",
+                "opencode",
+                "models",
+                "opencode-go",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=MODEL_LIST_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("opencode-go model discovery timed out") from exc
+    if result.returncode:
+        detail = result.stderr.strip()[-500:] or "remote model discovery failed"
+        raise RuntimeError(detail)
+    models = tuple(
+        line.removeprefix("opencode-go/").strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith("opencode-go/")
+    )
+    if not models:
+        raise RuntimeError("opencode-go model discovery returned no models")
+    return tuple(dict.fromkeys(models))
+
+
+def _aliyun_runner(prompt: str, model: str = DEFAULT_LLM_MODEL) -> str:
+    model_id = f"opencode-go/{model.removeprefix('opencode-go/')}"
+    remote_script = f"""
 import subprocess, sys, tempfile
 prompt = sys.stdin.read()
 with tempfile.TemporaryDirectory(prefix='poker-demo-') as directory:
     result = subprocess.run(
         ['opencode', 'run', '--pure', '--format', 'json', '--dir', directory,
-         '--model', 'opencode-go/deepseek-v4-flash', prompt],
+         '--model', {model_id!r}, prompt],
         capture_output=True, text=True, timeout=60, check=False,
     )
 if result.returncode:
@@ -73,9 +123,13 @@ sys.stdout.write(result.stdout)
     return result.stdout
 
 
-def provider_for(table: DemoTable):
+def provider_for(table: DemoTable, actor: int = 0):
     if table.config.provider_mode == "live_aliyun":
-        return OpenCodeGoProvider(model=LIVE_MODEL, run=_aliyun_runner)
+        model = table.model_for(actor)
+        return OpenCodeGoProvider(
+            model=model,
+            run=lambda prompt: _aliyun_runner(prompt, model),
+        )
     return DeterministicNarrativeProvider(seed=table.config.seed)
 
 
@@ -126,7 +180,7 @@ def enriched_decision_state(table: DemoTable, actor: int | None = None) -> dict[
 def decide(table: DemoTable, actor: int | None = None) -> DemoDecision:
     actor = table.hero_seat if actor is None else actor
     state = enriched_decision_state(table, actor)
-    response = provider_for(table).decide(state)
+    response = provider_for(table, actor).decide(state)
     payload = response.payload
     action = str(payload.get("action"))
     if action not in state["legal_actions"]:
@@ -147,7 +201,7 @@ def decide(table: DemoTable, actor: int | None = None) -> DemoDecision:
     return DemoDecision(action, raise_scale, advice, response)
 
 
-def reflect_and_patch(table: DemoTable) -> DemoReflection:
+def reflect_and_patch(table: DemoTable, actor: int = 0) -> DemoReflection:
     if table.hand is None or not table.hand.complete:
         raise ValueError("hand_not_complete")
     hand_index = table.hand.hand_index
@@ -158,20 +212,26 @@ def reflect_and_patch(table: DemoTable) -> DemoReflection:
             "street": item["street"],
         }
         for item in table.hand.actions
-        if item["seat"] == table.hero_seat
+        if item["seat"] == actor and item.get("controller") == "llm_closed_loop"
     ]
-    reward = float(table.hand.rewards[table.hero_seat])
+    reward = float(table.hand.rewards[actor])
+    current = table.strategy_for(actor)
     state = {
         "hand_index": hand_index,
+        "controlled_seat": actor,
+        "player_name": table.names[actor],
+        "base_persona": current["basePersona"],
         "reward": reward,
         "decisions": decisions,
         "public_actions": table.hand.actions,
         "showdown": table.hand.showdown,
-        "strategy": table.strategy,
+        "strategy": current,
+        "recent_reflections": table.reflection_memory_for(actor)[
+            -int(current["memoryHands"]) :
+        ],
     }
-    response = provider_for(table).reflect(state)
+    response = provider_for(table, actor).reflect(state)
     payload = response.payload
-    current = table.strategy
     direction = 1.0 if reward > 0 else -1.0 if reward < 0 else 0.0
     aggression = max(-0.20, min(0.20, float(current["aggressionBias"]) + 0.02 * direction))
     risk = max(-0.10, min(0.10, float(current["riskMarginDelta"]) - 0.01 * direction))
@@ -189,6 +249,8 @@ def reflect_and_patch(table: DemoTable) -> DemoReflection:
     }
     reflection = {
         "handIndex": hand_index,
+        "seat": actor,
+        "basePersona": current["basePersona"],
         "outcomeSummary": str(payload.get("outcome_summary", ""))[:300],
         "decisionReview": str(payload.get("decision_review", ""))[:500],
         "whatWorked": [str(value)[:160] for value in payload.get("what_worked", [])[:4]],

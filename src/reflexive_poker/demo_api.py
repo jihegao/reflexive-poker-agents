@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -10,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .demo_engine import DEMO_OPPONENT_TYPES
+from .demo_engine import DEFAULT_LLM_MODEL, DEMO_OPPONENT_TYPES
 from .demo_service import (
     DemoConflictError,
     DemoNotFoundError,
@@ -46,6 +47,10 @@ class AdviceToggleRequest(BaseModel):
     enabled: bool
 
 
+class SeatModelRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=80)
+
+
 def _raise_http(exc: Exception) -> None:
     if isinstance(exc, DemoNotFoundError):
         raise HTTPException(status_code=404, detail="table_not_found") from exc
@@ -62,12 +67,17 @@ def create_app(
     database: Path | None = None,
     *,
     live_call_limit: int | None = None,
+    model_loader: Callable[[], tuple[str, ...]] | None = None,
 ) -> FastAPI:
     database = database or Path(
         os.getenv("POKER_DEMO_DB", ".local/poker-demo/poker_demo.sqlite3")
     )
     limit = live_call_limit or int(os.getenv("POKER_DEMO_LIVE_CALL_LIMIT", "200"))
-    service = DemoService(database, live_call_limit=limit)
+    service = DemoService(
+        database,
+        live_call_limit=limit,
+        **({"model_loader": model_loader} if model_loader is not None else {}),
+    )
     app = FastAPI(title="Reflexive Poker Local Demo", version="0.1.0")
     app.state.demo_service = service
     app.add_middleware(
@@ -83,7 +93,7 @@ def create_app(
         return {
             "ok": True,
             "service": "reflexive-poker-demo",
-            "liveModel": "opencode-go/deepseek-v4-flash",
+            "defaultLiveModel": f"opencode-go/{DEFAULT_LLM_MODEL}",
             "liveCallLimit": service.live_call_limit,
         }
 
@@ -93,8 +103,12 @@ def create_app(
             "opponents": list(DEMO_OPPONENT_TYPES),
             "heroControllers": ["human", "llm_closed_loop"],
             "opponentControllers": ["rule_ai", "llm_closed_loop"],
-            "liveModel": "opencode-go/deepseek-v4-flash",
+            "defaultLiveModel": f"opencode-go/{DEFAULT_LLM_MODEL}",
         }
+
+    @app.get("/api/models")
+    async def models() -> dict[str, object]:
+        return await service.model_catalog()
 
     @app.post("/api/tables")
     async def create_table(
@@ -191,6 +205,19 @@ def create_app(
     ) -> dict[str, object]:
         try:
             table = await service.request_advice(table_id, poker_demo_owner)
+            return service.snapshot(table, owner=True)
+        except DEMO_API_ERRORS as exc:
+            _raise_http(exc)
+
+    @app.post("/api/tables/{table_id}/seats/{seat}/model")
+    async def seat_model(
+        table_id: str,
+        seat: int,
+        body: SeatModelRequest,
+        poker_demo_owner: str | None = Cookie(default=None),
+    ) -> dict[str, object]:
+        try:
+            table = await service.seat_model(table_id, poker_demo_owner, seat, body.model)
             return service.snapshot(table, owner=True)
         except DEMO_API_ERRORS as exc:
             _raise_http(exc)

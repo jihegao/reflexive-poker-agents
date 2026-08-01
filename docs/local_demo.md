@@ -16,21 +16,28 @@ tracked by Git.
 
 The default provider is `Deterministic Mock`, which is offline and reproducible.
 `Live · aliyun_99` is optional. It calls the already-authenticated remote
-OpenCode CLI over the restricted SSH alias and fixes the model to
-`opencode-go/deepseek-v4-flash`; it does not expose an HTTP LLM gateway.
+OpenCode CLI over the restricted SSH alias. Each of the six seats independently
+selects a model from the server-discovered `opencode-go` catalog; it does not
+expose an HTTP LLM gateway or accept arbitrary provider/model URLs.
 
 ## Frozen behavior
 
 - Hero switches between `Human Player` and `LLM Agent`; each of the other five
   seats can independently switch between its frozen rule strategy and an LLM
   controller.
+- Hero and every other seat persist an independent `opencode-go` model choice.
+  Existing tables default to `deepseek-v4-flash`.
+- Each LLM seat starts from its own persona (`closed_loop_shaper`, TAG, LAG,
+  Rock, Calling Station, or Myopic), receives only its own decision history and
+  reflection memory, and advances only its own bounded strategy-version chain
+  after a hand in which it acted.
 - Switching back to Human invalidates an in-flight LLM result. Provider errors,
   validation errors, the 60-second timeout, or the 200-call live budget pause
   delegation without silently changing the selected controller or taking a
   fallback action.
 - Human advice is read-only. It can observe public actions, but it never writes
   a strategy patch.
-- Strategy changes are bounded, LLM-authored, post-hand patches. The player can
+- Strategy changes are bounded, per-seat LLM-authored, post-hand patches. The player can
   inspect versions and diffs but cannot edit, freeze, or roll back them.
 - Each hand begins at 100 BB. There is no hand limit; the table can only be ended
   after a hand completes.

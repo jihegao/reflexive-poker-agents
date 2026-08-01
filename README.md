@@ -3,8 +3,8 @@
 ## Local playable table
 
 Run `./scripts/run_local_demo.sh`, then open `http://127.0.0.1:8790`. The demo
-supports Human/LLM Hero control, read-only LLM advice, fixed rule opponents,
-post-hand `closed_loop_shaper` strategy versions, SQLite recovery, and WebSocket
+supports per-seat Human/Rule/LLM control, per-seat OpenCode Go model selection,
+independent persona-based post-hand strategy versions, SQLite recovery, and WebSocket
 events. See [docs/local_demo.md](docs/local_demo.md) for the frozen behavior and
 verification commands.
 

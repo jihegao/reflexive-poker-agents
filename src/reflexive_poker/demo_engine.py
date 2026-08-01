@@ -11,9 +11,18 @@ from .models import ActionEvent, ActionType, Decision, DecisionContext, Street
 from .tournament_agents import make_tournament_agent
 
 DEMO_OPPONENT_TYPES = ("rock", "tag", "lag", "calling_station", "myopic")
+DEFAULT_LLM_MODEL = "deepseek-v4-flash"
 RAISE_SCALES = (0.25, 0.5, 0.75, 1.0, 1.25)
 STREETS = (Street.PREFLOP, Street.FLOP, Street.TURN, Street.RIVER)
 VISIBLE_BOARD_COUNT = (0, 3, 4, 5)
+PERSONA_DEFAULTS = {
+    "closed_loop_shaper": (0.0, 0.0, 0.5, 0.08),
+    "tag": (0.04, 0.02, 0.5, 0.06),
+    "lag": (0.15, -0.03, 0.75, 0.18),
+    "rock": (-0.12, 0.06, 0.25, 0.02),
+    "calling_station": (-0.05, -0.06, 0.25, 0.03),
+    "myopic": (0.0, -0.02, 0.5, 0.08),
+}
 
 
 @dataclass(frozen=True)
@@ -82,14 +91,24 @@ class DemoTable:
         self.version = 0
         self.controller = "human"
         self.opponent_controllers = ["rule_ai"] * 5
+        self.seat_models = [DEFAULT_LLM_MODEL] * 6
         self.controller_epoch = 0
         self.advice_enabled = False
         self.phase = "configuring"
         self.paused_reason: str | None = None
         self.hand: HandState | None = None
         self.completed_hands: list[dict[str, Any]] = []
-        self.strategy_versions: list[dict[str, Any]] = [self._initial_strategy()]
+        self.strategy_versions: list[dict[str, Any]] = [
+            self._initial_strategy(self.hero_seat, "closed_loop_shaper")
+        ]
         self.reflection_memory: list[dict[str, Any]] = []
+        self.opponent_strategy_versions: list[list[dict[str, Any]]] = [
+            [self._initial_strategy(seat, persona)]
+            for seat, persona in enumerate(self.config.opponents, 1)
+        ]
+        self.opponent_reflection_memories: list[list[dict[str, Any]]] = [
+            [] for _ in self.config.opponents
+        ]
         self.provider_usage = {
             "live_calls": 0,
             "mock_calls": 0,
@@ -105,25 +124,60 @@ class DemoTable:
             self.start_hand()
 
     @staticmethod
-    def _initial_strategy() -> dict[str, Any]:
+    def _initial_strategy(seat: int, persona: str) -> dict[str, Any]:
+        aggression, risk, raise_scale, bluff_cap = PERSONA_DEFAULTS[persona]
         return {
-            "strategyId": "closed_loop_shaper",
+            "strategyId": (
+                "closed_loop_shaper" if seat == 0 else f"{persona}_llm_seat_{seat}"
+            ),
+            "basePersona": persona,
             "version": 1,
-            "aggressionBias": 0.0,
-            "riskMarginDelta": 0.0,
-            "preferredRaiseScale": 0.5,
-            "bluffFrequencyCap": 0.08,
+            "aggressionBias": aggression,
+            "riskMarginDelta": risk,
+            "preferredRaiseScale": raise_scale,
+            "bluffFrequencyCap": bluff_cap,
             "memoryHands": 6,
             "targeting": [],
-            "notes": ["初始平衡策略"],
+            "notes": [f"Initial {persona} persona"],
             "author": "system",
-            "reason": "initial_strategy",
+            "reason": f"initial_{persona}_strategy",
             "appliedAfterHand": None,
         }
 
     @property
     def strategy(self) -> dict[str, Any]:
         return self.strategy_versions[-1]
+
+    def strategy_versions_for(self, seat: int) -> list[dict[str, Any]]:
+        if seat == self.hero_seat:
+            return self.strategy_versions
+        if not 1 <= seat <= 5:
+            raise ValueError("invalid_seat")
+        return self.opponent_strategy_versions[seat - 1]
+
+    def strategy_for(self, seat: int) -> dict[str, Any]:
+        return self.strategy_versions_for(seat)[-1]
+
+    def reflection_memory_for(self, seat: int) -> list[dict[str, Any]]:
+        if seat == self.hero_seat:
+            return self.reflection_memory
+        if not 1 <= seat <= 5:
+            raise ValueError("invalid_seat")
+        return self.opponent_reflection_memories[seat - 1]
+
+    @staticmethod
+    def _upgrade_strategy_versions(
+        values: list[dict[str, Any]], seat: int, persona: str
+    ) -> list[dict[str, Any]]:
+        strategy_id = "closed_loop_shaper" if seat == 0 else f"{persona}_llm_seat_{seat}"
+        return [
+            {
+                **value,
+                "strategyId": value.get("strategyId", strategy_id),
+                "basePersona": value.get("basePersona", persona),
+            }
+            for value in values
+        ]
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -285,6 +339,7 @@ class DemoTable:
     def decision_state(self, actor: int | None = None) -> dict[str, Any]:
         actor = self.hero_seat if actor is None else actor
         context = self._decision_context(actor)
+        strategy = self.strategy_for(actor)
         return {
             "task": "choose_poker_action",
             "hand_index": context.hand_index,
@@ -297,8 +352,12 @@ class DemoTable:
             "legal_actions": [value.value for value in context.legal_actions],
             "active_players": context.active_players,
             "opponents": list(context.opponents),
-            "strategy": self.strategy,
-            "recent_reflections": self.reflection_memory[-int(self.strategy["memoryHands"]) :],
+            "player_name": context.player_name,
+            "base_persona": strategy["basePersona"],
+            "strategy": strategy,
+            "recent_reflections": self.reflection_memory_for(actor)[
+                -int(strategy["memoryHands"]) :
+            ],
             "public_actions": list(self.hand.actions if self.hand else []),
             "controlled_seat": actor,
         }
@@ -413,8 +472,13 @@ class DemoTable:
             "paid": _round_bb(paid),
             "pot_before": _round_bb(pot_before),
             "active_players": sum(hand.active),
-            "strategy_version": self.strategy["version"] if actor == self.hero_seat else None,
+            "strategy_version": self.strategy_for(actor)["version"],
             "controller": self.controller_for(actor),
+            "model": (
+                self.model_for(actor)
+                if self.controller_for(actor) == "llm_closed_loop"
+                else None
+            ),
         }
         hand.actions.append(event)
         self.last_advice = None
@@ -452,6 +516,9 @@ class DemoTable:
                 self.names[index]: hand.rewards[index] for index in range(6)
             },
             "strategyVersion": self.strategy["version"],
+            "strategyVersions": [
+                int(self.strategy_for(seat)["version"]) for seat in range(6)
+            ],
             "controller": self.controller,
             "actions": list(hand.actions),
         }
@@ -547,13 +614,38 @@ class DemoTable:
                 self.phase = "running"
                 self.advance_until_blocked()
 
+    def model_for(self, seat: int) -> str:
+        if not 0 <= seat <= 5:
+            raise ValueError("invalid_seat")
+        return self.seat_models[seat]
+
+    def set_seat_model(self, seat: int, model: str) -> None:
+        if not 0 <= seat <= 5:
+            raise ValueError("invalid_seat")
+        normalized = model.removeprefix("opencode-go/").strip()
+        if (
+            not normalized
+            or len(normalized) > 80
+            or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in normalized)
+        ):
+            raise ValueError("invalid_llm_model")
+        if self.seat_models[seat] == normalized:
+            return
+        self.seat_models[seat] = normalized
+        self.controller_epoch += 1
+        self.paused_reason = None
+        self._emit(
+            "player.model_changed",
+            {"seat": seat, "model": f"opencode-go/{normalized}"},
+        )
+
     def set_advice_enabled(self, enabled: bool) -> None:
         self.advice_enabled = bool(enabled)
         if not enabled:
             self.last_advice = None
         self._emit("hero.advice_changed", {"enabled": self.advice_enabled})
 
-    def record_provider_call(self, response: Any, *, purpose: str) -> None:
+    def record_provider_call(self, response: Any, *, purpose: str, actor: int = 0) -> None:
         key = "live_calls" if self.config.provider_mode == "live_aliyun" else "mock_calls"
         self.provider_usage[key] += 1
         self.provider_usage["input_tokens"] += int(response.input_tokens or 0)
@@ -565,6 +657,7 @@ class DemoTable:
             "llm.completed",
             {
                 "purpose": purpose,
+                "seat": actor,
                 "provider": response.provider,
                 "model": response.model,
                 "latencyMs": _round_bb(response.latency_ms),
@@ -581,17 +674,38 @@ class DemoTable:
             {"seat": actor, "advice": advice},
         )
 
-    def record_reflection(self, reflection: dict[str, Any]) -> None:
-        self.reflection_memory.append(reflection)
-        maximum = max(12, int(self.strategy["memoryHands"]))
-        self.reflection_memory = self.reflection_memory[-maximum:]
+    def record_reflection(self, reflection: dict[str, Any], *, actor: int = 0) -> None:
+        memory = self.reflection_memory_for(actor)
+        memory.append({**reflection, "seat": actor})
+        maximum = max(12, int(self.strategy_for(actor)["memoryHands"]))
+        del memory[:-maximum]
         self._emit(
-            "hero.reflection_completed",
+            "hero.reflection_completed" if actor == 0 else "player.reflection_completed",
             {
+                "seat": actor,
                 "handIndex": reflection.get("handIndex"),
                 "summary": reflection.get("outcomeSummary"),
             },
         )
+
+    def pending_reflection_seats(self) -> list[int]:
+        if self.hand is None or not self.hand.complete:
+            return []
+        hand_index = self.hand.hand_index
+        llm_seats = {
+            int(action["seat"])
+            for action in self.hand.actions
+            if action.get("controller") == "llm_closed_loop"
+        }
+        return [
+            seat
+            for seat in sorted(llm_seats)
+            if self.controller_for(seat) == "llm_closed_loop"
+            and not any(
+                int(item.get("handIndex", -1)) == hand_index
+                for item in self.reflection_memory_for(seat)
+            )
+        ]
 
     def record_stale_llm_response(self, purpose: str) -> None:
         self._emit("llm.discarded", {"purpose": purpose, "reason": "state_changed"})
@@ -620,10 +734,13 @@ class DemoTable:
             },
         )
 
-    def apply_strategy_patch(self, patch: dict[str, Any]) -> dict[str, Any]:
+    def apply_strategy_patch(
+        self, patch: dict[str, Any], *, actor: int = 0
+    ) -> dict[str, Any]:
+        current = self.strategy_for(actor)
         if patch.get("author") != "llm_closed_loop":
             raise ValueError("invalid_strategy_patch_author")
-        if int(patch.get("baseStrategyVersion", -1)) != int(self.strategy["version"]):
+        if int(patch.get("baseStrategyVersion", -1)) != int(current["version"]):
             raise ValueError("strategy_version_conflict")
         changes = patch.get("changes")
         if not isinstance(changes, dict) or not changes:
@@ -639,21 +756,23 @@ class DemoTable:
         }
         if set(changes) - allowed:
             raise ValueError("invalid_strategy_patch_field")
-        updated = {**self.strategy, **changes}
-        self._validate_strategy(updated)
+        updated = {**current, **changes}
+        self._validate_strategy(updated, actor=actor)
         updated.update(
             {
-                "strategyId": "closed_loop_shaper",
-                "version": int(self.strategy["version"]) + 1,
+                "strategyId": current["strategyId"],
+                "basePersona": current["basePersona"],
+                "version": int(current["version"]) + 1,
                 "author": "llm_closed_loop",
                 "reason": str(patch.get("reason", "closed_loop_adjustment"))[:240],
                 "appliedAfterHand": self.hand.hand_index if self.hand else None,
             }
         )
-        self.strategy_versions.append(updated)
+        self.strategy_versions_for(actor).append(updated)
         self._emit(
-            "hero.strategy_applied",
+            "hero.strategy_applied" if actor == 0 else "player.strategy_applied",
             {
+                "seat": actor,
                 "patchId": patch.get("patchId"),
                 "fromVersion": updated["version"] - 1,
                 "toVersion": updated["version"],
@@ -663,7 +782,7 @@ class DemoTable:
         )
         return updated
 
-    def _validate_strategy(self, value: dict[str, Any]) -> None:
+    def _validate_strategy(self, value: dict[str, Any], *, actor: int = 0) -> None:
         bounds = {
             "aggressionBias": (-0.20, 0.20),
             "riskMarginDelta": (-0.10, 0.10),
@@ -681,12 +800,15 @@ class DemoTable:
             raise ValueError("invalid_strategy_patch_notes")
         targeting = value.get("targeting", [])
         signals = {"folds_to_pressure", "raises_often", "calls_wide"}
+        valid_targets = {
+            name for seat, name in enumerate(self.names) if seat != actor
+        }
         if not isinstance(targeting, list) or len(targeting) > 5:
             raise ValueError("invalid_strategy_patch_targeting")
         for target in targeting:
             if (
                 not isinstance(target, dict)
-                or target.get("opponent") not in self.names[1:]
+                or target.get("opponent") not in valid_targets
                 or target.get("signal") not in signals
                 or not 0.0 <= float(target.get("weight", -1.0)) <= 0.5
             ):
@@ -722,6 +844,8 @@ class DemoTable:
                         "isButton": index == hand.button,
                         "isActor": not hand.complete and index == hand.actor,
                         "controller": self.controller_for(index),
+                        "model": self.model_for(index),
+                        "strategyProfile": self.strategy_for(index),
                     }
                 )
             hand_data = {
@@ -769,10 +893,15 @@ class DemoTable:
             "raiseScales": list(RAISE_SCALES),
             "strategy": self.strategy,
             "strategyVersions": list(self.strategy_versions),
+            "seatStrategies": [self.strategy_for(index) for index in range(6)],
             "lastAdvice": self.last_advice if owner else None,
             "providerUsage": self.provider_usage if owner else {},
             "providerMode": self.config.provider_mode,
-            "model": "deepseek-v4-flash" if self.config.provider_mode == "live_aliyun" else "mock-narrative-v1",
+            "model": (
+                self.model_for(self.hero_seat)
+                if self.config.provider_mode == "live_aliyun"
+                else "mock-narrative-v1"
+            ),
             "completedHandCount": len(self.completed_hands),
             "hand": hand_data,
         }
@@ -784,6 +913,7 @@ class DemoTable:
             "version": self.version,
             "controller": self.controller,
             "opponent_controllers": self.opponent_controllers,
+            "seat_models": self.seat_models,
             "controller_epoch": self.controller_epoch,
             "advice_enabled": self.advice_enabled,
             "phase": self.phase,
@@ -792,6 +922,8 @@ class DemoTable:
             "completed_hands": self.completed_hands,
             "strategy_versions": self.strategy_versions,
             "reflection_memory": self.reflection_memory,
+            "opponent_strategy_versions": self.opponent_strategy_versions,
+            "opponent_reflection_memories": self.opponent_reflection_memories,
             "provider_usage": self.provider_usage,
             "last_advice": self.last_advice,
             "ended": self.ended,
@@ -805,14 +937,31 @@ class DemoTable:
         table.version = int(value["version"])
         table.controller = value["controller"]
         table.opponent_controllers = list(value.get("opponent_controllers", ["rule_ai"] * 5))
+        table.seat_models = list(value.get("seat_models", [DEFAULT_LLM_MODEL] * 6))
         table.controller_epoch = int(value["controller_epoch"])
         table.advice_enabled = bool(value["advice_enabled"])
         table.phase = value["phase"]
         table.paused_reason = value.get("paused_reason")
         table.hand = HandState(**value["hand"]) if value.get("hand") else None
         table.completed_hands = list(value.get("completed_hands", []))
-        table.strategy_versions = list(value["strategy_versions"])
+        table.strategy_versions = table._upgrade_strategy_versions(
+            list(value["strategy_versions"]), 0, "closed_loop_shaper"
+        )
         table.reflection_memory = list(value.get("reflection_memory", []))
+        stored_opponent_strategies = value.get("opponent_strategy_versions")
+        if stored_opponent_strategies is not None:
+            table.opponent_strategy_versions = [
+                table._upgrade_strategy_versions(list(versions), seat, persona)
+                for seat, (persona, versions) in enumerate(
+                    zip(table.config.opponents, stored_opponent_strategies, strict=True), 1
+                )
+            ]
+        table.opponent_reflection_memories = [
+            list(memory)
+            for memory in value.get(
+                "opponent_reflection_memories", [[] for _ in table.config.opponents]
+            )
+        ]
         table.provider_usage = dict(value["provider_usage"])
         table.last_advice = value.get("last_advice")
         table.ended = bool(value.get("ended", False))

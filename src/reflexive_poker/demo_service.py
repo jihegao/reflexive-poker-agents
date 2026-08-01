@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import time
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .demo_engine import DemoConfig, DemoTable
-from .demo_llm import LLM_TIMEOUT_SECONDS, decide, reflect_and_patch
+from .demo_llm import (
+    FALLBACK_OPENCODE_GO_MODELS,
+    LLM_TIMEOUT_SECONDS,
+    decide,
+    list_opencode_go_models,
+    reflect_and_patch,
+)
 from .demo_store import DemoStore, owner_hash
 
 
@@ -24,11 +32,20 @@ class DemoConflictError(Exception):
 
 
 class DemoService:
-    def __init__(self, database: Path, *, live_call_limit: int = 200) -> None:
+    def __init__(
+        self,
+        database: Path,
+        *,
+        live_call_limit: int = 200,
+        model_loader: Callable[[], tuple[str, ...]] = list_opencode_go_models,
+    ) -> None:
         self.store = DemoStore(database)
         self.live_call_limit = live_call_limit
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._driver_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._model_loader = model_loader
+        self._model_cache: dict[str, Any] | None = None
+        self._model_cache_time = 0.0
 
     async def create(
         self,
@@ -125,6 +142,52 @@ class DemoService:
         table, _ = self._load(table_id)
         return table
 
+    async def model_catalog(self, *, force: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if (
+            not force
+            and self._model_cache is not None
+            and now - self._model_cache_time < 300.0
+        ):
+            return dict(self._model_cache)
+        try:
+            models = await asyncio.to_thread(self._model_loader)
+            catalog = {
+                "provider": "opencode-go",
+                "models": list(models),
+                "source": "aliyun_99",
+                "error": None,
+            }
+        except Exception as exc:  # noqa: BLE001 - discovery has a known safe fallback
+            catalog = {
+                "provider": "opencode-go",
+                "models": list(FALLBACK_OPENCODE_GO_MODELS),
+                "source": "fallback",
+                "error": type(exc).__name__,
+            }
+        self._model_cache = catalog
+        self._model_cache_time = now
+        return dict(catalog)
+
+    async def seat_model(
+        self, table_id: str, token: str | None, seat: int, model: str
+    ) -> DemoTable:
+        if not 0 <= seat <= 5:
+            raise DemoConflictError("invalid_seat")
+        async with self._locks[table_id]:
+            _, stored_hash = self._load(table_id)
+            self._require_owner(stored_hash, token)
+        normalized = model.removeprefix("opencode-go/").strip()
+        catalog = await self.model_catalog()
+        if normalized not in catalog["models"]:
+            raise DemoConflictError("unsupported_opencode_go_model")
+        table = await self._mutate(
+            table_id, token, lambda value: value.set_seat_model(seat, normalized)
+        )
+        await self.drive_llm(table_id)
+        table, _ = self._load(table_id)
+        return table
+
     async def advice_enabled(
         self, table_id: str, token: str | None, enabled: bool
     ) -> DemoTable:
@@ -175,7 +238,7 @@ class DemoService:
             if current_key != captured or current.controller != "human":
                 current.record_stale_llm_response("advice")
             else:
-                current.record_provider_call(result.response, purpose="advice")
+                current.record_provider_call(result.response, purpose="advice", actor=0)
                 current.record_advice(result.advice)
             self.store.save(current, stored_hash)
             return current
@@ -199,16 +262,10 @@ class DemoService:
                     if table.hand is None:
                         return
                     if table.hand.complete:
-                        if not table.completed_hands or (
-                            table.completed_hands[-1].get("controller") != "llm_closed_loop"
-                        ):
+                        pending_reflections = table.pending_reflection_seats()
+                        if not pending_reflections:
                             return
-                        already_reflected = any(
-                            int(item.get("handIndex", -1)) == table.hand.hand_index
-                            for item in table.reflection_memory
-                        )
-                        if already_reflected:
-                            return
+                        actor = pending_reflections[0]
                         purpose = "reflection"
                     elif (
                         table.phase == "waiting_llm"
@@ -221,7 +278,8 @@ class DemoService:
                         table.pause_for_provider_failure("live_call_budget_exhausted")
                         self.store.save(table, stored_hash)
                         return
-                    actor = table.hero_seat if purpose == "reflection" else table.hand.actor
+                    if purpose == "action":
+                        actor = table.hand.actor
                     captured = (
                         table.version,
                         table.controller_epoch,
@@ -237,7 +295,7 @@ class DemoService:
                         )
                     else:
                         result = await asyncio.wait_for(
-                            asyncio.to_thread(reflect_and_patch, table),
+                            asyncio.to_thread(reflect_and_patch, table, actor),
                             timeout=LLM_TIMEOUT_SECONDS,
                         )
                 except Exception as exc:  # noqa: BLE001 - provider boundary must hand control back
@@ -264,13 +322,15 @@ class DemoService:
                         self.store.save(current, stored_hash)
                         return
                     try:
-                        current.record_provider_call(result.response, purpose=purpose)
+                        current.record_provider_call(
+                            result.response, purpose=purpose, actor=actor
+                        )
                         if purpose == "action":
                             current.record_advice(result.advice, actor=actor)
                             current.apply_action(actor, result.action, result.raise_scale)
                         else:
-                            current.record_reflection(result.reflection)
-                            current.apply_strategy_patch(result.patch)
+                            current.record_reflection(result.reflection, actor=actor)
+                            current.apply_strategy_patch(result.patch, actor=actor)
                     except ValueError as exc:
                         current.pause_for_provider_failure(
                             f"{purpose}_validation_failure: {str(exc)[:180]}"

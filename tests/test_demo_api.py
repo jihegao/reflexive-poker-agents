@@ -7,7 +7,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from reflexive_poker.demo_api import create_app
-from reflexive_poker.demo_llm import LLM_TIMEOUT_SECONDS
+from reflexive_poker.demo_engine import DemoConfig, DemoTable
+from reflexive_poker.demo_llm import LLM_TIMEOUT_SECONDS, provider_for
 from reflexive_poker.demo_llm import decide as real_decide
 from reflexive_poker.demo_service import DemoService
 
@@ -127,6 +128,35 @@ def test_other_agent_can_switch_to_llm_and_take_its_action(tmp_path: Path) -> No
         assert seat_one_actions[0]["controller"] == "llm_closed_loop"
 
 
+def test_opponent_llm_reflects_into_its_own_strategy_chain(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "demo.sqlite3")
+    with TestClient(app) as client:
+        state = client.post(
+            "/api/tables", json={"provider_mode": "mock", "seed": 9200}
+        ).json()
+        table_id = state["tableId"]
+        state = client.post(
+            f"/api/tables/{table_id}/seats/1/controller",
+            json={"controller": "llm_closed_loop"},
+        ).json()
+
+        for _ in range(40):
+            if state["phase"] == "hand_complete":
+                break
+            assert state["canAct"]
+            state = client.post(
+                f"/api/tables/{table_id}/actions",
+                json={"action": "check_call", "raise_scale": 0.5},
+            ).json()
+        else:
+            raise AssertionError("hand did not complete")
+
+        assert state["strategy"]["version"] == 1
+        assert state["hand"]["seats"][1]["strategyProfile"]["version"] == 2
+        assert state["hand"]["seats"][1]["strategyProfile"]["basePersona"] == "tag"
+        assert state["seatStrategies"][0]["basePersona"] == "closed_loop_shaper"
+
+
 def test_llm_timeout_is_sixty_seconds() -> None:
     assert LLM_TIMEOUT_SECONDS == 60
 
@@ -153,3 +183,51 @@ def test_llm_failure_does_not_switch_back_to_human(tmp_path: Path, monkeypatch) 
         assert state["pausedReason"].startswith("action_provider_failure_mock")
 
     asyncio.run(scenario())
+
+
+def test_model_catalog_and_per_seat_model_selection(tmp_path: Path) -> None:
+    models = ("deepseek-v4-flash", "qwen3.7-plus")
+    app = create_app(tmp_path / "demo.sqlite3", model_loader=lambda: models)
+    with TestClient(app) as client:
+        catalog = client.get("/api/models")
+        assert catalog.status_code == 200
+        assert catalog.json() == {
+            "provider": "opencode-go",
+            "models": list(models),
+            "source": "aliyun_99",
+            "error": None,
+        }
+
+        state = client.post("/api/tables", json={}).json()
+        table_id = state["tableId"]
+        selected = client.post(
+            f"/api/tables/{table_id}/seats/4/model",
+            json={"model": "opencode-go/qwen3.7-plus"},
+        )
+        assert selected.status_code == 200
+        assert selected.json()["hand"]["seats"][4]["model"] == "qwen3.7-plus"
+
+        unsupported = client.post(
+            f"/api/tables/{table_id}/seats/4/model",
+            json={"model": "not-in-catalog"},
+        )
+        assert unsupported.status_code == 409
+        assert unsupported.json()["detail"] == "unsupported_opencode_go_model"
+
+
+def test_live_provider_uses_the_controlled_seats_model(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_runner(prompt: str, model: str) -> str:
+        captured.update(prompt=prompt, model=model)
+        return "ok"
+
+    monkeypatch.setattr("reflexive_poker.demo_llm._aliyun_runner", fake_runner)
+    table = DemoTable(DemoConfig(provider_mode="live_aliyun", equity_samples=2))
+    table.set_seat_model(2, "glm-5.2")
+
+    provider = provider_for(table, 2)
+
+    assert provider.model == "glm-5.2"
+    assert provider.run("test prompt") == "ok"
+    assert captured == {"prompt": "test prompt", "model": "glm-5.2"}

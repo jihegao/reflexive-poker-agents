@@ -1,6 +1,6 @@
 # 在线策略扑克 Demo 产品与技术设计
 
-> 状态：设计稿，尚未实现。视觉基线见 [在线多人扑克“牌局教练”视觉方案](online_poker_coach_visual.md)。
+> 状态：本地 Demo 已实现，在线部署部分仍为设计稿。视觉基线见 [在线多人扑克“牌局教练”视觉方案](online_poker_coach_visual.md)。
 
 ![桌面端概念图](assets/online-poker-coach-concept.png)
 
@@ -9,8 +9,8 @@
 这个 Demo 是一个自包含的六人德州策略实验桌。用户可以：
 
 1. 为五个对手分别选择策略；
-2. 让自己的 Hero Player 在人工操作与 `LLM Agent + closed-loop-shaper` 之间切换；
-3. 允许 closed-loop-shaper 根据公开牌局反馈改写自身策略配置；
+2. 让 Hero 在人工与 LLM 间切换，并让其他座位在冻结规则与 LLM 间独立切换；
+3. 允许每个 LLM 座位根据自己的公开牌局反馈改写自身策略配置；
 4. 在同一牌桌里查看动作、胜率、简短依据、对手模型和策略版本变化；
 5. 打完后比较“我的选择”和“LLM 行动”，或回看策略如何逐步调整。
 
@@ -24,7 +24,7 @@
 - 策略改写有结构化 diff、版本、原因、应用时点和回滚入口；
 - 相同 seed、阵容、初始策略和已记录 patch 可以重放相同对局；
 - 刷新、断线重连后不产生两套互相冲突的牌桌状态；
-- LLM 不可用时自动退回安全规则策略，牌局仍能继续。
+- LLM 不可用时保留当前控制器并暂停，用户可重试或主动切回 Human/Rule。
 
 ### 非目标
 
@@ -33,7 +33,7 @@
 - 宣称策略达到 GTO 或能稳定盈利；
 - 首版支持锦标赛淘汰、真钱、账户余额、商城或排行榜；
 - 用模型置信度伪装成策略混合频率；
-- 允许 LLM 改写源代码、提示模板、工具权限、规则引擎或对手策略。
+- 允许 LLM 改写源代码、提示模板、工具权限、规则引擎或其他座位的策略。
 
 ## 2. 游戏模式
 
@@ -48,13 +48,13 @@
 ### Hero 选择
 
 - **我来玩**：用户点击 Fold、Check/Call 或 Raise；
-- **LLM 接管**：只允许连接 `closed_loop_shaper`，由 `LLMPlayer` 使用公开状态、对手统计、近期反思和当前策略版本行动；
-- **安全 fallback**：provider 超时、失败或输出非法时由内部规则策略临时行动，不作为用户可选择的 Hero 模式；
-- **对手**：始终使用创建牌桌时冻结的规则策略，运行中不可切换为 LLM。
+- **Hero LLM 接管**：连接 `closed_loop_shaper`，由 `LLMPlayer` 使用公开状态、对手统计、Hero 近期反思和 Hero 当前策略版本行动；
+- **失败处理**：provider 超时、失败或输出非法时暂停当前 LLM 座位，且不擅自改变控制器；
+- **其他座位**：可在创建牌桌时冻结的规则 persona 与 LLM 间切换；进入 LLM 时以该 persona 初始化独立策略、记忆和版本链。
 
 Hero 可以在对局过程中切换控制权。切换命令在**下一个尚未开始的 Hero 决策点**生效；若已有 LLM 请求在途，则撤销其 pending token，迟到响应按版本过期处理。UI 必须在座位卡、底部操作区和时间线同时显示当前控制者。
 
-closed-loop-shaper 可以在过程中改写策略，但只能提交受 schema 约束的 `StrategyPatch`。patch 在当前动作结算后原子应用于下一个决策点，不能追溯修改已经发生的动作。
+每个 LLM 座位可以在过程中改写自己的策略，但只能提交受 schema 约束的 `StrategyPatch`。单手结束后按座位逐一反思并原子应用 patch，不能修改其他座位或追溯已经发生的动作。
 
 ## 3. 对手策略目录
 
@@ -70,7 +70,7 @@ closed-loop-shaper 可以在过程中改写策略，但只能提交受 schema �
 
 ### 暂不作为成熟能力宣传
 
-`passive_tracker` 和 `open_loop_shaper` 不进入 Demo。`closed_loop_shaper` 不作为对手下拉项，只作为 Hero 连接 LLM 后的唯一策略壳。当前 `LLMPlayer` 已会保存每手反思并把 `strategy_adjustment` 重新提供给后续决策，但仍是自由文本记忆；目标实现还需要把它升级成版本化、可验证、可回滚的策略 patch。
+`passive_tracker` 和 `open_loop_shaper` 不进入 Demo。Hero 的 LLM 策略壳为 `closed_loop_shaper`；其他座位沿用 TAG、LAG、Rock、Calling Station 或 Myopic 作为 LLM 的初始 persona。每个座位分别保存结构化反思，并把受验证的 patch 写入自己的版本链。
 
 ### 阵容预设
 
@@ -91,7 +91,7 @@ flowchart LR
     C --> D["设置手数、seed 和教学建议"]
     D --> E["创建牌桌"]
     E --> F["实时对局"]
-    F -->|Hero 决策点| I["切换 Human / LLM"]
+    F -->|任一座位决策点| I["切换 Human/Rule / LLM"]
     I --> F
     F -->|LLM 反馈| J["验证并应用 StrategyPatch"]
     J --> F
@@ -192,8 +192,8 @@ stateDiagram-v2
 - 发牌、权益采样和规则 AI 都从冻结 seed 派生；
 - AI 超时或返回非法动作时暂停该 LLM 控制器，并在 UI 中明确标注；
 - 控制切换、策略 patch 和回滚都使用相同的版本检查与幂等规则；
-- 只有牌桌 owner 能切换各座位控制器或改变 Hero 策略；
-- 对手策略在建桌后冻结，不接受任何运行时 patch；
+- 只有牌桌 owner 能切换各座位控制器或选择模型；
+- 规则控制时 persona 冻结；LLM 控制时只接受该座位自己产生的运行时 patch；
 - Human 思考期间 Demo 默认不设强制倒计时，公开多人房间才启用 server-side deadline。
 
 ## 6. 前后端契约
@@ -222,7 +222,7 @@ stateDiagram-v2
 }
 ```
 
-`controller` 只允许 `human` 或 `llm_closed_loop`。Hero 的 `strategyId` 始终是 `closed_loop_shaper`；Human 控制时该 profile 继续积累公开观察但不自动行动。provider 和 model 由服务端配置，不能从浏览器传入任意模型 URL 或密钥。
+Hero 的 `controller` 只允许 `human` 或 `llm_closed_loop`，其他座位只允许 `rule_ai` 或 `llm_closed_loop`。Hero 的 `strategyId` 是 `closed_loop_shaper`，其他座位各自使用基于初始 persona 的独立 `strategyId`。provider 固定为服务端 `opencode-go`，每个座位只能从服务端发现并校验的模型目录中选择 model，不能从浏览器传入任意 provider、模型 URL 或密钥。
 
 ### 6.2 动作命令
 
@@ -304,9 +304,9 @@ LLM 每次只能返回 patch，不能替换完整对象：
 }
 ```
 
-`author` 只允许 `hero` 或 `llm_closed_loop`。玩家可以在策略版本面板手动修改同一组受限字段；LLM 接管时也可以自动提出 patch。两者使用完全相同的验证器。验证器限制字段、数值范围、目标必须是当前对手、notes 数量和文本长度。应用流程固定为 `proposed → validated → persisted → applied → broadcast`；base version 或 snapshot version 过期时拒绝。每个版本都可回滚，但回滚同样只在下一个 Hero 决策点生效。
+`author` 只允许 `llm_closed_loop`。每个 LLM 座位在单手结束后只能为自己的 profile 提出 patch。验证器限制字段、数值范围、targeting 不能指向自己、notes 数量和文本长度。应用流程固定为 `proposed → validated → persisted → applied → broadcast`；base version 过期时拒绝。
 
-当前实现中的 `recent_reflections[].strategy_adjustment` 是设计输入，不等同于已应用的 patch。实现时需要新增结构化 schema、validator、version store 和把 profile 映射到下一次 LLM 决策上下文的逻辑。
+当前实现会把每个座位的结构化反思转换为受限 `StrategyPatch`，经 validator 校验后写入该座位的 version store，并把更新后的 profile 与近期反思映射到下一次 LLM 决策上下文。
 
 ### 6.4 实时事件包
 
@@ -343,6 +343,8 @@ LLM 每次只能返回 patch，不能替换完整对象：
 | `POST` | `/api/tables/:id/actions` | 提交 Human 动作 |
 | `POST` | `/api/tables/:id/hero/controller` | 切换 Hero 的 Human / LLM 控制权 |
 | `POST` | `/api/tables/:id/seats/:seat/controller` | 切换指定座位的 Rule AI / LLM 控制权 |
+| `POST` | `/api/tables/:id/seats/:seat/model` | 从服务端目录选择指定座位的 opencode-go 模型 |
+| `GET` | `/api/models` | 获取缓存的远端 opencode-go 模型目录 |
 | `POST` | `/api/tables/:id/hero/strategy` | 验证并应用或回滚 StrategyPatch |
 | `POST` | `/api/tables/:id/control` | 暂停、继续、单步或调速 |
 | `GET` | `/api/tables/:id/events` | WebSocket 升级和实时事件 |
@@ -377,7 +379,7 @@ Cloudflare 当前支持把静态资产和 Worker 逻辑作为一个部署单元�
 
 - 一个 `tableId` 对应一个 Durable Object，不建立全局总桌对象；
 - 保存冻结配置、牌局版本、事件日志、当前快照和幂等 command；
-- 保存 Hero controller、pending AI token、策略版本链和回滚记录；
+- 保存逐座位 controller、模型选择、pending AI token、策略版本链和反思记忆；
 - 先持久化，再广播；
 - 通过 WebSocket Hibernation 保持连接并降低空闲成本；
 - hibernation 后从 SQLite 和 socket attachment 恢复，而不是依赖内存；
@@ -446,7 +448,7 @@ Gateway 对外首选两个领域端点：
 - 不接受客户端传来的 command、directory、plugin、tool 或 provider credential；
 - 日志只保存 request ID、模型、延迟、token、状态码和 fallback，不记录密钥或隐藏推理；
 - 模型返回必须再次通过现有 JSON Schema、合法动作和 snapshot version 校验。
-- Gateway 只能为 Hero 生成 patch，任何指向对手 seat 的策略写入都直接拒绝。
+- Gateway 只能为请求中的受控座位生成其自身 patch，任何跨座位策略写入都直接拒绝。
 
 Cloudflare Tunnel 使用 origin 主动建立的出站连接；Access Service Token 适合 Worker 到 origin 的服务认证。实现时参考 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/) 和 [Access Service Tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/)。
 
@@ -456,8 +458,8 @@ Cloudflare Tunnel 使用 origin 主动建立的出站连接；Access Service Tok
 - Gateway 通过受认证的本地 server/session API 调用，或使用 `opencode run --attach http://127.0.0.1:4096`；
 - Gateway 自身只监听 loopback，再由 `cloudflared` tunnel 转发；
 - 初始并发设为 `1`，基准测试后再提高，队列满时快速返回 `429`；
-- 实时决策采用短 deadline，超时后 Demo 立即使用规则 fallback，不能阻塞牌桌；
-- 首发只开放 `deepseek-v4-flash`，其他已安装模型需分别通过 schema、延迟和成本验收后再加入。
+- 实时决策采用 60 秒 deadline，超时后保留该座位的 LLM 控制器并暂停牌桌，等待用户重试或主动切回 Human/Rule；
+- 模型选择仅开放 `aliyun_99` 上 `opencode models opencode-go` 返回的目录；目录短暂不可达时使用最近验证的受限回退列表。每次调用记录实际 provider/model，便于后续按 schema、延迟和成本审计。
 
 正式上线前的验收：服务重启可恢复、凭证不出现在进程参数和日志、未认证请求被拒绝、完整 OpenCode API 无法从公网访问、恶意 prompt 不能启用工具、并发和超时可控、Worker 到 origin 的请求可追踪、模型失败时牌局仍能继续。
 
@@ -543,9 +545,9 @@ Python Worker 运行方式和 beta 状态以官方 [Python Workers](https://deve
 ### D1：本地可玩 Demo
 
 - 接现有 Python 环境；
-- 支持 Hero 在 Human 与 deterministic LLM closed-loop 之间切换；
-- 支持版本化 StrategyPatch、diff、拒绝和回滚；
-- 五个对手始终是冻结的规则策略；
+- 支持 Hero 在 Human 与 deterministic LLM 间切换，其他座位在 Rule 与 LLM 间切换；
+- 支持逐座位 persona、反思记忆和版本化 StrategyPatch；
+- 支持每个座位独立选择服务端发现的 opencode-go 模型；
 - 完成 6 手、重放、seed 复现和 fallback 展示。
 
 ### D2：Worker 兼容性 spike
@@ -585,7 +587,7 @@ Python Worker 运行方式和 beta 状态以官方 [Python Workers](https://deve
 
 ## 14. 下一步交接
 
-- **产品**：Hero 仅允许 Human / LLM closed-loop，五个对手仅允许冻结规则策略；
+- **产品**：Hero 允许 Human / LLM，五个其他座位允许 Rule / LLM，并各自维护策略和模型；
 - **扑克内核**：把一手执行拆成可暂停、逐 action 推进的 reducer，并新增 controller epoch；
 - **前端**：先用 fixture 完成三页与状态机，不等待云端；
 - **平台**：完成 Python Worker + Durable Object spike 后再确定最终运行语言；

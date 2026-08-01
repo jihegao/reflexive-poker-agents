@@ -11,9 +11,13 @@ type Seat = {
   isButton: boolean;
   isActor: boolean;
   controller: "human" | "rule_ai" | "llm_closed_loop";
+  model: string;
+  strategyProfile: Strategy;
 };
 
 type Strategy = {
+  strategyId: string;
+  basePersona: string;
   version: number;
   aggressionBias: number;
   riskMarginDelta: number;
@@ -73,6 +77,7 @@ type TableState = {
 };
 
 type LiveEvent = { seq: number; type: string; payload: Record<string, unknown> };
+type ModelCatalog = { provider: string; models: string[]; source: string; error: string | null };
 
 const OPPONENTS = ["rock", "tag", "lag", "calling_station", "myopic"];
 const LABELS: Record<string, string> = {
@@ -116,6 +121,10 @@ function Switch({ checked, onChange, disabled = false, label }: { checked: boole
   );
 }
 
+function modelOptions(catalog: ModelCatalog | null, selected: string) {
+  return Array.from(new Set([selected, ...(catalog?.models || [])]));
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_ROOT}${path}`, {
     credentials: "include",
@@ -157,7 +166,7 @@ function Setup({ onStart, busy }: { onStart: (opponents: string[], mode: string)
               <b>Deterministic Mock</b><span>离线、可复现，验收默认</span>
             </button>
             <button className={`provider-choice ${mode === "live_aliyun" ? "selected" : ""}`} onClick={() => setMode("live_aliyun")}>
-              <b>Live · aliyun_99</b><span>固定 deepseek-v4-flash · 60s 超时</span>
+              <b>Live · aliyun_99</b><span>每个 Player 独立选择 opencode-go 模型 · 60s 超时</span>
             </button>
             {mode === "live_aliyun" && <p className="live-warning">Live 会通过受限 SSH 使用远端已登录的 OpenCode CLI；不会启动公网 LLM 网关。</p>}
           </div>
@@ -223,7 +232,7 @@ function LeftRail({ state, events, busy, command }: { state: TableState; events:
         {hand.seats.slice(1).map((seat) => (
           <div className="opponent-item" key={seat.seat}>
             <i className={`type-dot type-${seat.strategy}`} />
-            <div><b>{LABELS[seat.strategy]}</b><span>Seat {seat.seat} · {seat.controller === "llm_closed_loop" ? "LLM Agent" : "Rule AI"} · {seat.active ? "在局" : "已弃牌"}</span></div>
+            <div><b>{LABELS[seat.strategy]}</b><span>Seat {seat.seat} · {seat.controller === "llm_closed_loop" ? `LLM · ${seat.strategyProfile.basePersona} v${seat.strategyProfile.version}` : "Rule AI"} · {seat.active ? "在局" : "已弃牌"}</span></div>
             <strong>{seat.stackBb.toFixed(0)}</strong>
             <Switch
               label={`切换 Seat ${seat.seat} 控制器`}
@@ -243,7 +252,7 @@ function LeftRail({ state, events, busy, command }: { state: TableState; events:
   );
 }
 
-function AgentRail({ state, busy, command }: { state: TableState; busy: boolean; command: (path: string, body?: unknown) => void }) {
+function AgentRail({ state, catalog, busy, command }: { state: TableState; catalog: ModelCatalog | null; busy: boolean; command: (path: string, body?: unknown) => void }) {
   const strategy = state.strategy;
   const previous = state.strategyVersions.at(-2);
   const delta = (key: keyof Strategy) => previous ? Number(strategy[key]) - Number(previous[key]) : 0;
@@ -255,6 +264,24 @@ function AgentRail({ state, busy, command }: { state: TableState; busy: boolean;
         <Switch label="切换 Hero 控制器" checked={state.controller === "llm_closed_loop"} disabled={busy || !state.owner} onChange={() => command("hero/controller", { controller: state.controller === "human" ? "llm_closed_loop" : "human" })} />
       </div>
       <div className="model-strip"><span>{state.providerMode === "mock" ? "MOCK" : "LIVE"}</span><b>{state.model}</b><i>{state.providerMode === "mock" ? state.providerUsage.mock_calls || 0 : `${state.liveCallBudget.used}/${state.liveCallBudget.limit}`}</i></div>
+      <div className="seat-models">
+        <div className="section-head">Player Models <span>{catalog?.source === "aliyun_99" ? "OPENCODE-GO LIVE" : "CACHED LIST"}</span></div>
+        {state.hand?.seats.map((seat) => (
+          <label className="seat-model-row" key={seat.seat}>
+            <span><b>{seat.seat === 0 ? "Hero" : `Seat ${seat.seat}`}</b><small>{seat.strategyProfile.basePersona} · v{seat.strategyProfile.version}</small></span>
+            <select
+              aria-label={`选择 ${seat.seat === 0 ? "Hero" : `Seat ${seat.seat}`} 模型`}
+              value={seat.model}
+              disabled={busy || !state.owner || !catalog?.models.length}
+              onChange={(event) => command(`seats/${seat.seat}/model`, { model: event.target.value })}
+            >
+              {modelOptions(catalog, seat.model).map((model) => <option key={model} value={model}>{model}</option>)}
+            </select>
+          </label>
+        ))}
+        {state.providerMode === "mock" && <p>Mock 牌桌仅保存模型预设；创建 Live 牌桌后调用所选模型。</p>}
+        {catalog?.error && <p>远端目录暂不可用，当前显示缓存列表。</p>}
+      </div>
       {state.pausedReason && <div className="failure-banner"><b>LLM 已暂停，控制器保持不变</b><span>{state.pausedReason}</span></div>}
       <div className="advice-toggle">
         <div><b>LLM 行动建议</b><span>只读，不改写策略</span></div>
@@ -318,6 +345,7 @@ export default function App() {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const refreshTimer = useRef<number | null>(null);
 
   const load = useCallback(async (tableId: string) => {
@@ -333,6 +361,12 @@ export default function App() {
     const tableId = localStorage.getItem("poker_demo_table");
     if (tableId) void load(tableId);
   }, [load]);
+
+  useEffect(() => {
+    void request<ModelCatalog>("/api/models")
+      .then(setCatalog)
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, []);
 
   useEffect(() => {
     if (!state?.tableId || state.ended) return;
@@ -383,7 +417,7 @@ export default function App() {
       <div className="workspace">
         <LeftRail state={state} events={events} busy={busy} command={command} />
         <TableCenter state={state} />
-        <AgentRail state={state} busy={busy} command={command} />
+        <AgentRail state={state} catalog={catalog} busy={busy} command={command} />
       </div>
       <ActionDock state={state} busy={busy} command={command} />
       {busy && <div className="busy-bar"><span /></div>}

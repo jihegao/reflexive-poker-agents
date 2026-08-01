@@ -28,6 +28,13 @@ class CreateTableRequest(BaseModel):
     opponents: tuple[str, str, str, str, str] = DEFAULT_OPPONENTS
     provider_mode: Literal["mock", "live_aliyun"] = "mock"
     seed: int = Field(default=9200, ge=0, le=2_147_483_647)
+    seat_configs: list[SeatConfigRequest] | None = None
+
+
+class SeatConfigRequest(BaseModel):
+    strategy: str
+    controller: Literal["human", "rule_ai", "llm_closed_loop"]
+    model: str = Field(default=DEFAULT_LLM_MODEL, min_length=1, max_length=80)
 
 
 class ActionRequest(BaseModel):
@@ -122,6 +129,9 @@ def create_app(
                 opponents=body.opponents,
                 provider_mode=body.provider_mode,
                 seed=body.seed,
+                seat_configs=[config.model_dump() for config in body.seat_configs]
+                if body.seat_configs is not None
+                else None,
             )
         except DEMO_API_ERRORS as exc:
             _raise_http(exc)

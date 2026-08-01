@@ -345,6 +345,7 @@ LLM 每次只能返回 patch，不能替换完整对象：
 | `POST` | `/api/tables/:id/seats/:seat/controller` | 切换指定座位的 Rule AI / LLM 控制权 |
 | `POST` | `/api/tables/:id/seats/:seat/model` | 从服务端目录选择指定座位的 opencode-go 模型 |
 | `GET` | `/api/models` | 获取缓存的远端 opencode-go 模型目录 |
+| `POST` | `/api/tables` | `seat_configs[]` 同时冻结六个座位的 strategy、controller 和 model |
 | `POST` | `/api/tables/:id/hero/strategy` | 验证并应用或回滚 StrategyPatch |
 | `POST` | `/api/tables/:id/control` | 暂停、继续、单步或调速 |
 | `GET` | `/api/tables/:id/events` | WebSocket 升级和实时事件 |

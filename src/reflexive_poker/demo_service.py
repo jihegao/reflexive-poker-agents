@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .demo_engine import DemoConfig, DemoTable
+from .demo_engine import DEMO_OPPONENT_TYPES, DemoConfig, DemoTable
 from .demo_llm import (
     FALLBACK_OPENCODE_GO_MODELS,
     LLM_TIMEOUT_SECONDS,
@@ -54,16 +54,47 @@ class DemoService:
         opponents: tuple[str, ...],
         provider_mode: str,
         seed: int,
+        seat_configs: list[dict[str, str]] | None = None,
     ) -> tuple[DemoTable, str]:
         token = owner_token or secrets.token_urlsafe(32)
         token_hash = owner_hash(token)
         active = self.store.active_for_owner(token_hash)
         if active is not None:
             return active, token
+        if seat_configs is not None:
+            if len(seat_configs) != 6:
+                raise DemoConflictError("seat_configs_requires_six_players")
+            configured_opponents = tuple(
+                str(config.get("strategy", "")) for config in seat_configs[1:]
+            )
+            if any(strategy not in DEMO_OPPONENT_TYPES for strategy in configured_opponents):
+                raise DemoConflictError("unsupported_demo_opponent")
+            hero_controller = seat_configs[0].get("controller")
+            if hero_controller not in {"human", "llm_closed_loop"}:
+                raise DemoConflictError("invalid_hero_controller")
+            if any(
+                config.get("controller") not in {"rule_ai", "llm_closed_loop"}
+                for config in seat_configs[1:]
+            ):
+                raise DemoConflictError("invalid_opponent_controller")
+            opponents = configured_opponents
         table = DemoTable(
             DemoConfig(seed=seed, opponents=opponents, provider_mode=provider_mode)
         )
+        if seat_configs is not None:
+            catalog = await self.model_catalog()
+            for seat, config in enumerate(seat_configs):
+                model = str(config.get("model", "")).removeprefix("opencode-go/").strip()
+                if model not in catalog["models"]:
+                    raise DemoConflictError("unsupported_opencode_go_model")
+                table.set_seat_model(seat, model)
+            for seat, config in enumerate(seat_configs):
+                controller = str(config["controller"])
+                table.set_seat_controller(seat, controller)
         self.store.save(table, token_hash)
+        if seat_configs is not None:
+            await self.drive_llm(table.table_id)
+            table, _ = self._load(table.table_id)
         return table, token
 
     def _load(self, table_id: str) -> tuple[DemoTable, str]:

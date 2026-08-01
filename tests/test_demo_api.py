@@ -215,6 +215,31 @@ def test_model_catalog_and_per_seat_model_selection(tmp_path: Path) -> None:
         assert unsupported.json()["detail"] == "unsupported_opencode_go_model"
 
 
+def test_create_accepts_per_seat_strategy_controller_and_model(tmp_path: Path) -> None:
+    app = create_app(
+        tmp_path / "demo.sqlite3",
+        model_loader=lambda: ("deepseek-v4-flash", "qwen3.7-plus"),
+    )
+    players = [
+        {"strategy": "closed_loop_shaper", "controller": "human", "model": "qwen3.7-plus"},
+        {"strategy": "rock", "controller": "llm_closed_loop", "model": "qwen3.7-plus"},
+        {"strategy": "lag", "controller": "rule_ai", "model": "deepseek-v4-flash"},
+        {"strategy": "tag", "controller": "rule_ai", "model": "deepseek-v4-flash"},
+        {"strategy": "calling_station", "controller": "rule_ai", "model": "deepseek-v4-flash"},
+        {"strategy": "myopic", "controller": "rule_ai", "model": "deepseek-v4-flash"},
+    ]
+    with TestClient(app) as client:
+        state = client.post(
+            "/api/tables",
+            json={"provider_mode": "mock", "seat_configs": players},
+        ).json()
+
+    assert state["hand"]["seats"][0]["model"] == "qwen3.7-plus"
+    assert state["hand"]["seats"][1]["strategy"] == "rock"
+    assert state["hand"]["seats"][1]["controller"] == "llm_closed_loop"
+    assert state["hand"]["seats"][1]["model"] == "qwen3.7-plus"
+
+
 def test_live_provider_uses_the_controlled_seats_model(monkeypatch) -> None:
     captured: dict[str, str] = {}
 

@@ -27,6 +27,9 @@ expose an HTTP LLM gateway or accept arbitrary provider/model URLs.
   controller.
 - Hero and every other seat persist an independent `opencode-go` model choice.
   Existing tables default to `deepseek-v4-flash`.
+- The entry page configures all six seats at once: strategy, Human/Rule/LLM
+  controller, and model. The service mode is inferred automatically; a table
+  with an LLM seat uses the live provider, while an all-Rule table stays mock.
 - Each LLM seat starts from its own persona (`closed_loop_shaper`, TAG, LAG,
   Rock, Calling Station, or Myopic), receives only its own decision history and
   reflection memory, and advances only its own bounded strategy-version chain
@@ -39,8 +42,11 @@ expose an HTTP LLM gateway or accept arbitrary provider/model URLs.
   a strategy patch.
 - Strategy changes are bounded, per-seat LLM-authored, post-hand patches. The player can
   inspect versions and diffs but cannot edit, freeze, or roll back them.
+- The left Agent list shows each LLM seat's model. Clicking an LLM seat opens
+  its current-hand decision history and saved reflections; the right rail stays
+  dedicated to Hero and shows the current LLM thought.
 - Each hand begins at 100 BB. There is no hand limit; the table can only be ended
-  after a hand completes.
+  after a hand completes, or ended immediately with the owner leave control.
 - The anonymous owner is identified by an HttpOnly cookie. Anyone without that
   cookie receives a read-only view, and folded or non-showdown opponent cards
   remain hidden in replay state.

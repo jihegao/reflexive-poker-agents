@@ -109,6 +109,7 @@ class DemoTable:
         self.opponent_reflection_memories: list[list[dict[str, Any]]] = [
             [] for _ in self.config.opponents
         ]
+        self.decision_histories: list[list[dict[str, Any]]] = [[] for _ in range(6)]
         self.provider_usage = {
             "live_calls": 0,
             "mock_calls": 0,
@@ -481,7 +482,8 @@ class DemoTable:
             ),
         }
         hand.actions.append(event)
-        self.last_advice = None
+        if actor == self.hero_seat and self.controller_for(actor) == "human":
+            self.last_advice = None
         self._emit("player.acted", event)
         hand.actor = (actor + 1) % 6
         self.phase = "running"
@@ -667,6 +669,15 @@ class DemoTable:
         )
 
     def record_advice(self, advice: dict[str, Any], *, actor: int = 0) -> None:
+        history = self.decision_histories[actor]
+        history.append(
+            {
+                **advice,
+                "seat": actor,
+                "handIndex": self.hand.hand_index if self.hand else None,
+            }
+        )
+        del history[:-24]
         if actor == self.hero_seat:
             self.last_advice = advice
         self._emit(
@@ -815,10 +826,9 @@ class DemoTable:
                 raise ValueError("invalid_strategy_patch_targeting")
 
     def finish_table(self) -> None:
-        if self.hand is not None and not self.hand.complete:
-            raise ValueError("hand_in_progress")
         self.ended = True
         self.phase = "finished"
+        self.controller_epoch += 1
         self._emit("table.finished", {"hands": len(self.completed_hands)})
 
     def snapshot(self, *, owner: bool = True) -> dict[str, Any]:
@@ -846,6 +856,12 @@ class DemoTable:
                         "controller": self.controller_for(index),
                         "model": self.model_for(index),
                         "strategyProfile": self.strategy_for(index),
+                        "decisionHistory": [
+                            item
+                            for item in self.decision_histories[index]
+                            if item.get("handIndex") == hand.hand_index
+                        ] if owner else [],
+                        "reflections": self.reflection_memory_for(index)[-6:] if owner else [],
                     }
                 )
             hand_data = {
@@ -895,6 +911,7 @@ class DemoTable:
             "strategyVersions": list(self.strategy_versions),
             "seatStrategies": [self.strategy_for(index) for index in range(6)],
             "lastAdvice": self.last_advice if owner else None,
+            "heroDecisionHistory": self.decision_histories[0][-6:] if owner else [],
             "providerUsage": self.provider_usage if owner else {},
             "providerMode": self.config.provider_mode,
             "model": (
@@ -924,6 +941,7 @@ class DemoTable:
             "reflection_memory": self.reflection_memory,
             "opponent_strategy_versions": self.opponent_strategy_versions,
             "opponent_reflection_memories": self.opponent_reflection_memories,
+            "decision_histories": self.decision_histories,
             "provider_usage": self.provider_usage,
             "last_advice": self.last_advice,
             "ended": self.ended,
@@ -962,6 +980,12 @@ class DemoTable:
                 "opponent_reflection_memories", [[] for _ in table.config.opponents]
             )
         ]
+        stored_decisions = value.get("decision_histories")
+        table.decision_histories = (
+            [list(values) for values in stored_decisions]
+            if isinstance(stored_decisions, list) and len(stored_decisions) == 6
+            else [[] for _ in range(6)]
+        )
         table.provider_usage = dict(value["provider_usage"])
         table.last_advice = value.get("last_advice")
         table.ended = bool(value.get("ended", False))

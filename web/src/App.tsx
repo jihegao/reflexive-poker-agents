@@ -13,6 +13,8 @@ type Seat = {
   controller: "human" | "rule_ai" | "llm_closed_loop";
   model: string;
   strategyProfile: Strategy;
+  decisionHistory: Advice[];
+  reflections: Reflection[];
 };
 
 type Strategy = {
@@ -39,6 +41,27 @@ type Advice = {
   provider: string;
   model: string;
   readOnly: boolean;
+  seat?: number;
+  handIndex?: number | null;
+};
+
+type Reflection = {
+  handIndex: number;
+  seat?: number;
+  basePersona?: string;
+  outcomeSummary: string;
+  decisionReview: string;
+  strategyAdjustment: string;
+  whatWorked: string[];
+  whatFailed: string[];
+  provider?: string;
+  model?: string;
+};
+
+type PlayerConfig = {
+  strategy: string;
+  controller: "human" | "rule_ai" | "llm_closed_loop";
+  model: string;
 };
 
 type TableState = {
@@ -56,6 +79,7 @@ type TableState = {
   strategy: Strategy;
   strategyVersions: Strategy[];
   lastAdvice: Advice | null;
+  heroDecisionHistory: Advice[];
   providerUsage: Record<string, number>;
   providerMode: "mock" | "live_aliyun";
   model: string;
@@ -80,6 +104,14 @@ type LiveEvent = { seq: number; type: string; payload: Record<string, unknown> }
 type ModelCatalog = { provider: string; models: string[]; source: string; error: string | null };
 
 const OPPONENTS = ["rock", "tag", "lag", "calling_station", "myopic"];
+const DEFAULT_PLAYERS: PlayerConfig[] = [
+  { strategy: "closed_loop_shaper", controller: "human", model: "deepseek-v4-flash" },
+  ...["tag", "lag", "rock", "calling_station", "myopic"].map((strategy) => ({
+    strategy,
+    controller: "rule_ai" as const,
+    model: "deepseek-v4-flash",
+  })),
+];
 const LABELS: Record<string, string> = {
   rock: "Rock",
   tag: "TAG",
@@ -138,40 +170,38 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json();
 }
 
-function Setup({ onStart, busy }: { onStart: (opponents: string[], mode: string) => void; busy: boolean }) {
-  const [opponents, setOpponents] = useState(["tag", "lag", "rock", "calling_station", "myopic"]);
-  const [mode, setMode] = useState("mock");
+function Setup({ onStart, busy, catalog }: { onStart: (players: PlayerConfig[]) => void; busy: boolean; catalog: ModelCatalog | null }) {
+  const [players, setPlayers] = useState<PlayerConfig[]>(DEFAULT_PLAYERS);
+  const update = (seat: number, patch: Partial<PlayerConfig>) => setPlayers((old) => old.map((player, index) => index === seat ? { ...player, ...patch } : player));
+  const models = (selected: string) => modelOptions(catalog, selected);
   return (
     <main className="setup-shell">
       <div className="setup-brand"><span className="brand-mark">R</span><span>REFLEXIVE TABLE</span></div>
       <section className="setup-card">
         <p className="eyebrow">LOCAL PLAYABLE LAB · 6-MAX NLH</p>
         <h1>在牌桌上观察一个策略<br />如何认识并改写自己。</h1>
-        <p className="setup-lead">你控制 Hero。进入牌桌后，Hero 和五位规则对手都可以按座位切换为 LLM agent。</p>
-        <div className="setup-grid">
-          <div>
-            <h2>对手阵容</h2>
-            {opponents.map((value, index) => (
-              <label className="setup-row" key={index}>
-                <span>Seat {index + 1}</span>
-                <select value={value} onChange={(event) => setOpponents((old) => old.map((item, i) => i === index ? event.target.value : item))}>
+        <p className="setup-lead">进入牌桌前为每个 Player 选择策略、控制方式和 opencode-go 模型。只有 LLM Agent 会调用所选模型。</p>
+        <div className="setup-players">
+          <div className="setup-players-head"><h2>Player 阵容与策略</h2><span>RULE / LLM · MODEL</span></div>
+          {players.map((player, seat) => (
+            <div className="setup-player-row" key={seat}>
+              <div className="setup-player-name"><b>{seat === 0 ? "YOU · HERO" : `Seat ${seat}`}</b><span>{seat === 0 ? "主玩家" : "对手座位"}</span></div>
+              {seat === 0 ? <div className="setup-fixed-strategy">closed-loop-shaper</div> : (
+                <select aria-label={`Seat ${seat} 策略`} value={player.strategy} onChange={(event) => update(seat, { strategy: event.target.value })}>
                   {OPPONENTS.map((item) => <option key={item} value={item}>{LABELS[item]}</option>)}
                 </select>
-              </label>
-            ))}
-          </div>
-          <div>
-            <h2>推理服务</h2>
-            <button className={`provider-choice ${mode === "mock" ? "selected" : ""}`} onClick={() => setMode("mock")}>
-              <b>Deterministic Mock</b><span>离线、可复现，验收默认</span>
-            </button>
-            <button className={`provider-choice ${mode === "live_aliyun" ? "selected" : ""}`} onClick={() => setMode("live_aliyun")}>
-              <b>Live · aliyun_99</b><span>每个 Player 独立选择 opencode-go 模型 · 60s 超时</span>
-            </button>
-            {mode === "live_aliyun" && <p className="live-warning">Live 会通过受限 SSH 使用远端已登录的 OpenCode CLI；不会启动公网 LLM 网关。</p>}
-          </div>
+              )}
+              <select aria-label={`${seat === 0 ? "Hero" : `Seat ${seat}`} 控制方式`} value={player.controller} onChange={(event) => update(seat, { controller: event.target.value as PlayerConfig["controller"] })}>
+                {seat === 0 ? <><option value="human">Human</option><option value="llm_closed_loop">LLM Agent</option></> : <><option value="rule_ai">Rule AI</option><option value="llm_closed_loop">LLM Agent</option></>}
+              </select>
+              <select aria-label={`选择 ${seat === 0 ? "Hero" : `Seat ${seat}`} 模型`} value={player.model} disabled={player.controller !== "llm_closed_loop"} onChange={(event) => update(seat, { model: event.target.value })}>
+                {models(player.model).map((model) => <option key={model} value={model}>{model}</option>)}
+              </select>
+            </div>
+          ))}
+          <p className="setup-caption">LLM Agent 会使用服务器发现的 opencode-go 模型目录；全部为 Rule AI 时使用离线规则模式。</p>
         </div>
-        <button className="start-button" disabled={busy} onClick={() => onStart(opponents, mode)}>{busy ? "正在建桌…" : "进入牌桌"}<span>↗</span></button>
+        <button className="start-button" disabled={busy} onClick={() => onStart(players)}>{busy ? "正在建桌…" : "进入牌桌"}<span>↗</span></button>
       </section>
       <p className="setup-foot">每手重置 100 BB · 无手数上限 · 仅手间结束</p>
     </main>
@@ -217,8 +247,9 @@ function TableCenter({ state }: { state: TableState }) {
   );
 }
 
-function LeftRail({ state, events, busy, command }: { state: TableState; events: LiveEvent[]; busy: boolean; command: (path: string, body?: unknown) => void }) {
+function LeftRail({ state, events, busy, command, selectedSeat, onSelect }: { state: TableState; events: LiveEvent[]; busy: boolean; command: (path: string, body?: unknown) => void; selectedSeat: number | null; onSelect: (seat: number) => void }) {
   const hand = state.hand!;
+  const selected = selectedSeat === null ? null : hand.seats.find((seat) => seat.seat === selectedSeat) || null;
   return (
     <aside className="rail left-rail">
       <div className="rail-title"><span>牌局状态</span><i className="live-dot" /> LIVE</div>
@@ -230,9 +261,11 @@ function LeftRail({ state, events, busy, command }: { state: TableState; events:
       <div className="section-head">其他 Agent <span>RULE / LLM</span></div>
       <div className="opponent-list">
         {hand.seats.slice(1).map((seat) => (
-          <div className="opponent-item" key={seat.seat}>
-            <i className={`type-dot type-${seat.strategy}`} />
-            <div><b>{LABELS[seat.strategy]}</b><span>Seat {seat.seat} · {seat.controller === "llm_closed_loop" ? `LLM · ${seat.strategyProfile.basePersona} v${seat.strategyProfile.version}` : "Rule AI"} · {seat.active ? "在局" : "已弃牌"}</span></div>
+          <div className={`opponent-item ${selectedSeat === seat.seat ? "selected" : ""}`} key={seat.seat}>
+            <button className="agent-select" onClick={() => onSelect(seat.seat)}>
+              <i className={`type-dot type-${seat.strategy}`} />
+              <span><b>{LABELS[seat.strategy]}</b><small>Seat {seat.seat} · {seat.controller === "llm_closed_loop" ? `LLM · ${seat.model} · v${seat.strategyProfile.version}` : "Rule AI"} · {seat.active ? "在局" : "已弃牌"}</small></span>
+            </button>
             <strong>{seat.stackBb.toFixed(0)}</strong>
             <Switch
               label={`切换 Seat ${seat.seat} 控制器`}
@@ -243,6 +276,7 @@ function LeftRail({ state, events, busy, command }: { state: TableState; events:
           </div>
         ))}
       </div>
+      {selected && <AgentInspector seat={selected} />}
       <div className="section-head event-heading">实时事件 <span>{state.version}</span></div>
       <div className="event-list">
         {events.slice(-6).reverse().map((event) => <div key={event.seq}><i /> <span>{event.type.replaceAll(".", " / ")}</span><time>#{event.seq}</time></div>)}
@@ -252,10 +286,32 @@ function LeftRail({ state, events, busy, command }: { state: TableState; events:
   );
 }
 
-function AgentRail({ state, catalog, busy, command }: { state: TableState; catalog: ModelCatalog | null; busy: boolean; command: (path: string, body?: unknown) => void }) {
+function AgentInspector({ seat }: { seat: Seat }) {
+  return (
+    <div className="agent-inspector">
+      <div className="agent-inspector-head"><div><span>SELECTED AGENT</span><b>{LABELS[seat.strategy]}</b></div><em>{seat.controller === "llm_closed_loop" ? "LLM" : "RULE"}</em></div>
+      {seat.controller === "llm_closed_loop" ? <>
+        <div className="agent-model">{seat.model} · strategy v{seat.strategyProfile.version}</div>
+        <div className="inspector-section"><span>本局思考历史</span>
+          {seat.decisionHistory.length ? seat.decisionHistory.slice().reverse().map((advice, index) => (
+            <div className="thought-item" key={`${advice.handIndex}-${index}`}><div><b>{LABELS[advice.action] || advice.action}</b><time>{advice.confidence ? `${Math.round(advice.confidence * 100)}%` : "LLM"}</time></div><p>{advice.rationale || advice.summary || "—"}</p></div>
+          )) : <p className="empty-inspector">本手尚未产生 LLM 思考。</p>}
+        </div>
+        <div className="inspector-section"><span>反思信息</span>
+          {seat.reflections.length ? seat.reflections.slice().reverse().map((reflection, index) => (
+            <div className="reflection-item" key={`${reflection.handIndex}-${index}`}><b>手牌 #{reflection.handIndex + 1}</b><p>{reflection.outcomeSummary || "—"}</p><small>{reflection.strategyAdjustment || "保持当前策略"}</small></div>
+          )) : <p className="empty-inspector">还没有已保存的反思。</p>}
+        </div>
+      </> : <p className="empty-inspector">Rule AI 不产生 LLM 思考或反思记录。</p>}
+    </div>
+  );
+}
+
+function AgentRail({ state, busy, command }: { state: TableState; busy: boolean; command: (path: string, body?: unknown) => void }) {
   const strategy = state.strategy;
   const previous = state.strategyVersions.at(-2);
   const delta = (key: keyof Strategy) => previous ? Number(strategy[key]) - Number(previous[key]) : 0;
+  const thought = state.lastAdvice || state.heroDecisionHistory.at(-1);
   return (
     <aside className="rail agent-rail">
       <div className="agent-head">
@@ -264,37 +320,11 @@ function AgentRail({ state, catalog, busy, command }: { state: TableState; catal
         <Switch label="切换 Hero 控制器" checked={state.controller === "llm_closed_loop"} disabled={busy || !state.owner} onChange={() => command("hero/controller", { controller: state.controller === "human" ? "llm_closed_loop" : "human" })} />
       </div>
       <div className="model-strip"><span>{state.providerMode === "mock" ? "MOCK" : "LIVE"}</span><b>{state.model}</b><i>{state.providerMode === "mock" ? state.providerUsage.mock_calls || 0 : `${state.liveCallBudget.used}/${state.liveCallBudget.limit}`}</i></div>
-      <div className="seat-models">
-        <div className="section-head">Player Models <span>{catalog?.source === "aliyun_99" ? "OPENCODE-GO LIVE" : "CACHED LIST"}</span></div>
-        {state.hand?.seats.map((seat) => (
-          <label className="seat-model-row" key={seat.seat}>
-            <span><b>{seat.seat === 0 ? "Hero" : `Seat ${seat.seat}`}</b><small>{seat.strategyProfile.basePersona} · v{seat.strategyProfile.version}</small></span>
-            <select
-              aria-label={`选择 ${seat.seat === 0 ? "Hero" : `Seat ${seat.seat}`} 模型`}
-              value={seat.model}
-              disabled={busy || !state.owner || !catalog?.models.length}
-              onChange={(event) => command(`seats/${seat.seat}/model`, { model: event.target.value })}
-            >
-              {modelOptions(catalog, seat.model).map((model) => <option key={model} value={model}>{model}</option>)}
-            </select>
-          </label>
-        ))}
-        {state.providerMode === "mock" && <p>Mock 牌桌仅保存模型预设；创建 Live 牌桌后调用所选模型。</p>}
-        {catalog?.error && <p>远端目录暂不可用，当前显示缓存列表。</p>}
-      </div>
       {state.pausedReason && <div className="failure-banner"><b>LLM 已暂停，控制器保持不变</b><span>{state.pausedReason}</span></div>}
-      <div className="advice-toggle">
-        <div><b>LLM 行动建议</b><span>只读，不改写策略</span></div>
-        <Switch label="切换 LLM 行动建议" checked={state.adviceEnabled} disabled={busy || state.controller !== "human" || !state.owner} onChange={() => command("hero/advice-toggle", { enabled: !state.adviceEnabled })} />
+      <div className="hero-thinking">
+        <div className="hero-thinking-head"><div><span>当前形势下的 LLM 思考</span><b>{state.controller === "llm_closed_loop" ? "自动决策记录" : "只读建议"}</b></div><em>{thought ? `${Math.round((thought.confidence || 0) * 100)}%` : "—"}</em></div>
+        {thought ? <><div className="advice-action"><span>建议行动</span><b>{LABELS[thought.action] || thought.action}{thought.action === "raise" ? ` · ${thought.raiseScale === 1.25 ? "ALL-IN" : thought.raiseScale * 100 + "% POT"}` : ""}</b></div><p>{thought.rationale || thought.summary || "—"}</p></> : <p className="empty-inspector">当前还没有 LLM 思考记录。切换 Hero 为 LLM Agent 后会显示。</p>}
       </div>
-      {state.adviceEnabled && state.controller === "human" && (
-        <div className="advice-card">
-          {state.lastAdvice ? <>
-            <div className="advice-action"><span>建议行动</span><b>{LABELS[state.lastAdvice.action]}{state.lastAdvice.action === "raise" ? ` · ${state.lastAdvice.raiseScale === 1.25 ? "ALL-IN" : state.lastAdvice.raiseScale * 100 + "% POT"}` : ""}</b><em>{Math.round(state.lastAdvice.confidence * 100)}%</em></div>
-            <p>{state.lastAdvice.rationale}</p>
-          </> : <button disabled={busy || !state.canAct} onClick={() => command("hero/advice")}>分析当前决策点</button>}
-        </div>
-      )}
       <div className="strategy-head"><div><span>CURRENT STRATEGY</span><b>closed-loop-shaper</b></div><em>v{strategy.version}</em></div>
       <div className="strategy-metrics">
         <Metric label="激进偏置" value={strategy.aggressionBias} delta={delta("aggressionBias")} max={0.2} />
@@ -346,6 +376,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const refreshTimer = useRef<number | null>(null);
 
   const load = useCallback(async (tableId: string) => {
@@ -383,11 +414,14 @@ export default function App() {
     return () => socket.close();
   }, [state?.tableId, state?.ended, load]);
 
-  const start = async (opponents: string[], providerMode: string) => {
+  const start = async (players: PlayerConfig[]) => {
     setBusy(true); setError(null);
     try {
-      const value = await request<TableState>("/api/tables", { method: "POST", body: JSON.stringify({ opponents, provider_mode: providerMode }) });
+      const providerMode = players.some((player) => player.controller === "llm_closed_loop") ? "live_aliyun" : "mock";
+      const value = await request<TableState>("/api/tables", { method: "POST", body: JSON.stringify({ provider_mode: providerMode, opponents: players.slice(1).map((player) => player.strategy), seat_configs: players }) });
       localStorage.setItem("poker_demo_table", value.tableId);
+      setSelectedSeat(null);
+      setEvents([]);
       setState(value);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
@@ -406,18 +440,18 @@ export default function App() {
 
   const phaseLabel = useMemo(() => state ? ({ waiting_human: "等待 Hero", waiting_llm: "LLM 思考中", hand_complete: "本手完成", finished: "牌桌结束" }[state.phase] || "运行中") : "", [state]);
 
-  if (!state || state.ended) return <><Setup onStart={start} busy={busy} />{error && <div className="toast">{error}</div>}</>;
+  if (!state || state.ended) return <><Setup onStart={start} busy={busy} catalog={catalog} />{error && <div className="toast">{error}</div>}</>;
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark">R</span><div><b>REFLEXIVE TABLE</b><small>POKER AGENT LAB</small></div></div>
         <div className="table-id"><span>LOCAL TABLE</span><b>{state.tableId}</b><i>{phaseLabel}</i></div>
-        <div className="top-actions"><span className={state.owner ? "owner-badge" : "spectator-badge"}>{state.owner ? "OWNER SESSION" : "READ-ONLY"}</span><button onClick={() => void load(state.tableId)}>↻</button></div>
+        <div className="top-actions"><span className={state.owner ? "owner-badge" : "spectator-badge"}>{state.owner ? "OWNER SESSION" : "READ-ONLY"}</span><button aria-label="结束并离开牌局" disabled={busy || !state.owner} onClick={() => void command("finish")}>×</button></div>
       </header>
       <div className="workspace">
-        <LeftRail state={state} events={events} busy={busy} command={command} />
+        <LeftRail state={state} events={events} busy={busy} command={command} selectedSeat={selectedSeat} onSelect={setSelectedSeat} />
         <TableCenter state={state} />
-        <AgentRail state={state} catalog={catalog} busy={busy} command={command} />
+        <AgentRail state={state} busy={busy} command={command} />
       </div>
       <ActionDock state={state} busy={busy} command={command} />
       {busy && <div className="busy-bar"><span /></div>}

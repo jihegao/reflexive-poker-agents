@@ -197,3 +197,13 @@ def test_completed_hand_queues_reflection_for_each_llm_seat_that_acted() -> None
     assert table.pending_reflection_seats() == [0, 1]
     table.record_reflection({"handIndex": 0, "outcomeSummary": "hero"}, actor=0)
     assert table.pending_reflection_seats() == [1]
+
+
+def test_finish_table_can_leave_during_an_active_hand() -> None:
+    table = DemoTable(DemoConfig(equity_samples=2))
+    assert table.hand is not None and not table.hand.complete
+
+    table.finish_table()
+
+    assert table.ended is True
+    assert table.phase == "finished"

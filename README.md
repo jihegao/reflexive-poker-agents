@@ -1,5 +1,13 @@
 # Reflexive Poker Agents
 
+## Local playable table
+
+Run `./scripts/run_local_demo.sh`, then open `http://127.0.0.1:8790`. The demo
+supports Human/LLM Hero control, read-only LLM advice, fixed rule opponents,
+post-hand `closed_loop_shaper` strategy versions, SQLite recovery, and WebSocket
+events. See [docs/local_demo.md](docs/local_demo.md) for the frozen behavior and
+verification commands.
+
 A reproducible multi-agent poker testbed for situated self-models, strategic public-image shaping, player-type matchups, and auditable LLM-driven decisions.
 
 ## v0.5.0: LLMPlayer

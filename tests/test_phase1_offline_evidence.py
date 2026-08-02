@@ -11,9 +11,11 @@ from reflexive_poker.phase1_offline_evidence import (
     d2_d1bm_post_switch_contrasts,
     expected_calibration_error,
     holm_adjust,
+    offline_trajectory_inference,
     paired_trajectory_deltas,
     reliability_curve,
     trajectory_cluster_bootstrap,
+    type_calibration_tables,
     within_trajectory_paired_permutation,
 )
 
@@ -114,6 +116,21 @@ def test_post_switch_contrasts_include_fixed_interaction_and_holm() -> None:
     assert result["holm_p"].between(0.0, 1.0).all()
 
 
+def test_offline_inference_preserves_trajectory_deltas_and_applies_one_holm_family() -> None:
+    result, deltas = offline_trajectory_inference(
+        _scores().assign(provider="test", model="test"),
+        metrics=("action_brier",),
+        bootstrap_samples=100,
+        permutation_samples=100,
+        seed=7,
+    )
+    assert len(result) == 3
+    assert result["metric"].eq("action_brier").all()
+    assert result["holm_p"].between(0.0, 1.0).all()
+    assert set(deltas["regime"]) == {"fixed", "adaptive_shift"}
+    assert deltas["paired_observations"].eq(2).all()
+
+
 def test_calibration_helpers_report_reliability_ece_and_exact_decomposition() -> None:
     observed = np.array([0.0, 0.0, 1.0, 1.0])
     probabilities = np.array([0.1, 0.1, 0.9, 0.9])
@@ -126,6 +143,36 @@ def test_calibration_helpers_report_reliability_ece_and_exact_decomposition() ->
     assert decomposition.resolution == pytest.approx(0.25)
     assert decomposition.uncertainty == pytest.approx(0.25)
     assert decomposition.reconstructed_brier == pytest.approx(decomposition.brier_score)
+
+
+def test_type_calibration_tables_use_observed_active_type_not_action_distribution() -> None:
+    cases = [
+        {"case_id": "a", "ground_truth": {"active_type": "rock"}},
+        {"case_id": "b", "ground_truth": {"active_type": "tag"}},
+    ]
+    predictions = [
+        {
+            "case_id": "a",
+            "provider": "provider",
+            "model": "model",
+            "method": "llm_recursive_d2",
+            "treatment": "recursive_d2",
+            "payload": {"type_probabilities": {"rock": 0.8, "tag": 0.2}},
+        },
+        {
+            "case_id": "b",
+            "provider": "provider",
+            "model": "model",
+            "method": "llm_recursive_d2",
+            "treatment": "recursive_d2",
+            "payload": {"type_probabilities": {"rock": 0.3, "tag": 0.7}},
+        },
+    ]
+    summary, reliability = type_calibration_tables(cases, predictions, bins=2)
+    assert set(summary["target"]) == {"observed_active_type_one_vs_rest"}
+    assert set(summary["class"]) == {"rock", "tag"}
+    assert summary["ece"].notna().all()
+    assert set(reliability["class"]) == {"rock", "tag"}
 
 
 def test_binned_decomposition_accounts_for_within_bin_forecast_variance() -> None:

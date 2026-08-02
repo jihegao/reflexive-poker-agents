@@ -23,7 +23,10 @@ from .phase1_models import (
     ProviderLedger,
     ReasoningTreatment,
 )
-from .phase1_offline_evidence import d2_d1bm_post_switch_contrasts
+from .phase1_offline_evidence import (
+    offline_trajectory_inference,
+    type_calibration_tables,
+)
 
 PAPER_OPPONENT_TYPES = ("rock", "tag", "lag", "calling_station", "myopic")
 OFFLINE_TREATMENTS = (
@@ -970,23 +973,8 @@ def run_offline_benchmark(config: OfflineBenchmarkConfig) -> dict[str, Any]:
         total_tokens=("total_tokens", "sum"),
         latency_ms=("latency_ms", "sum"),
     )
-    evidence_rows: list[pd.DataFrame] = []
-    for (provider, model), group in scores.groupby(["provider", "model"], dropna=False):
-        if {
-            ReasoningTreatment.BUDGET_MATCHED_D1.value,
-            ReasoningTreatment.RECURSIVE_D2.value,
-        }.issubset(set(group["treatment"])) and {"fixed", "adaptive_shift"}.issubset(
-            set(group["regime"])
-        ):
-            contrast = d2_d1bm_post_switch_contrasts(group, metric="action_brier")
-            contrast.insert(0, "model", model)
-            contrast.insert(0, "provider", provider)
-            evidence_rows.append(contrast)
-    offline_inference = (
-        pd.concat(evidence_rows, ignore_index=True)
-        if evidence_rows
-        else pd.DataFrame()
-    )
+    offline_inference, trajectory_deltas = offline_trajectory_inference(scores)
+    calibration_summary, calibration_reliability = type_calibration_tables(cases, predictions)
     expected_model_predictions = (
         config.case_count * len(config.treatments) if config.provider != "baselines" else 0
     )
@@ -1095,6 +1083,11 @@ def run_offline_benchmark(config: OfflineBenchmarkConfig) -> dict[str, Any]:
     scores.to_csv(config.output_dir / "scores_per_case.csv", index=False)
     summary.to_csv(config.output_dir / "scores_per_model.csv", index=False)
     offline_inference.to_csv(config.output_dir / "offline_inference.csv", index=False)
+    trajectory_deltas.to_csv(config.output_dir / "offline_trajectory_deltas.csv", index=False)
+    calibration_summary.to_csv(config.output_dir / "type_calibration_summary.csv", index=False)
+    calibration_reliability.to_csv(
+        config.output_dir / "type_calibration_reliability.csv", index=False
+    )
     llm_scores = scores[scores["method"].str.startswith("llm_")]
     token_diagnostics = pd.DataFrame(
         columns=["case_id", "d1_budget_matched_prompt_chars", "recursive_d2_prompt_chars", "ratio"]
@@ -1161,5 +1154,8 @@ def run_offline_benchmark(config: OfflineBenchmarkConfig) -> dict[str, Any]:
         "scores_per_case": scores,
         "scores_per_model": summary,
         "offline_inference": offline_inference,
+        "offline_trajectory_deltas": trajectory_deltas,
+        "type_calibration_summary": calibration_summary,
+        "type_calibration_reliability": calibration_reliability,
         "provider_gate": gate,
     }

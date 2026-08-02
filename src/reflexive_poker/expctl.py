@@ -576,7 +576,14 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
             paired_blocks = pd.read_csv(
                 artifacts / "llm_confirmation" / "CROSS_MODEL_PAIRED_BLOCKS.csv"
             )
-            if len(paired_blocks) != expected_blocks or not bool(paired_blocks["valid"].all()):
+            completion_status = _load_json(
+                artifacts / "llm_confirmation" / "CROSS_MODEL_PAIRED_BLOCK_STATUS.json"
+            )
+            if (
+                completion_status.get("formal_completion_valid") is not True
+                or len(paired_blocks) != expected_blocks
+                or not bool(paired_blocks["valid"].all())
+            ):
                 raise ExpctlError(
                     "FORMAL_COMPLETION_INVALID",
                     "Phase 1 has no complete cross-model all-arm paired-block intersection",
@@ -584,6 +591,7 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                     details={
                         "expected_blocks": expected_blocks,
                         "paired_blocks": paired_blocks.to_dict(orient="records"),
+                        "completion_status": completion_status,
                     },
                 )
         _event(run_dir, "phase_completed", phase="closed_loop")

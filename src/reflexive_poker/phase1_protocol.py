@@ -64,3 +64,63 @@ def valid_paired_block_intersection(
             }
         )
     return pd.DataFrame(accepted)
+
+
+def validate_closed_loop_completion(
+    rows: pd.DataFrame,
+    *,
+    providers: Iterable[str],
+    treatments: Iterable[str],
+    regimes: Iterable[str],
+    target_seeds: Iterable[int],
+) -> dict[str, object]:
+    """Fail closed before a closed-loop run can be called formally complete.
+
+    A resumable worker may have useful partial artifacts, but it is not a
+    completed paper outcome until every requested seed has every provider,
+    treatment and regime exactly once, has a single shared formation checkpoint,
+    and every arm passes its provider gate.
+    """
+    required = {"seed", "provider", "treatment", "regime", "checkpoint_id", "valid"}
+    missing = sorted(required - set(rows.columns))
+    if missing:
+        raise ValueError(f"closed-loop rows are missing columns: {missing}")
+    seed_values = tuple(int(seed) for seed in target_seeds)
+    if not seed_values or len(set(seed_values)) != len(seed_values):
+        raise ValueError("target_seeds must be non-empty and unique")
+    expected = {
+        (provider, treatment, regime)
+        for provider in providers
+        for treatment in treatments
+        for regime in regimes
+    }
+    if not expected:
+        raise ValueError("providers, treatments, and regimes must be non-empty")
+    statuses: list[dict[str, object]] = []
+    for seed in seed_values:
+        group = rows.loc[rows["seed"] == seed]
+        observed = list(zip(group["provider"], group["treatment"], group["regime"], strict=True))
+        checkpoints = set(group["checkpoint_id"])
+        complete_arms = set(observed) == expected and len(observed) == len(expected)
+        provider_valid = bool(group["valid"].all()) and not group.empty
+        checkpoint_valid = len(checkpoints) == 1
+        statuses.append(
+            {
+                "seed": seed,
+                "valid": complete_arms and provider_valid and checkpoint_valid,
+                "missing_or_duplicate_arms": not complete_arms,
+                "provider_gate_failure": not provider_valid,
+                "checkpoint_mismatch": not checkpoint_valid,
+            }
+        )
+    unexpected_seeds = sorted(set(rows["seed"].astype(int)) - set(seed_values))
+    valid_blocks = sum(bool(status["valid"]) for status in statuses)
+    complete = valid_blocks == len(seed_values) and not unexpected_seeds
+    return {
+        "target_seeds": len(seed_values),
+        "valid_paired_blocks": valid_blocks,
+        "formal_completion_valid": complete,
+        "claim_status": "formal_closed_loop_complete" if complete else "incomplete_no_paper_outcome_claim",
+        "unexpected_seeds": unexpected_seeds,
+        "seed_statuses": statuses,
+    }

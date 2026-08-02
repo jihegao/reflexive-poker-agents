@@ -381,6 +381,154 @@ def d2_d1bm_post_switch_contrasts(
     return result
 
 
+def offline_trajectory_inference(
+    scores: pd.DataFrame,
+    *,
+    metrics: Sequence[str] = ("action_brier", "type_brier", "decision_regret"),
+    bootstrap_samples: int = 5_000,
+    permutation_samples: int = 20_000,
+    seed: int = 20260802,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Writeable Phase 1 offline inference at the trajectory, never row, level.
+
+    The returned first table carries all preregistered D2--D1-BM post-switch
+    contrasts.  Holm correction is deliberately applied across the complete
+    emitted family (models, metrics, regimes, and interaction), rather than
+    independently inside each convenient subset.  The second table preserves
+    the trajectory deltas used by the sign-flip tests.
+    """
+    required = {"provider", "model", "regime", "post_switch", "treatment", "trajectory_id", "case_id"}
+    missing = required.difference(scores.columns)
+    if missing:
+        raise ValueError(f"scores missing required columns: {sorted(missing)}")
+    if not metrics:
+        raise ValueError("at least one inference metric is required")
+    missing_metrics = set(metrics).difference(scores.columns)
+    if missing_metrics:
+        raise ValueError(f"scores missing inference metrics: {sorted(missing_metrics)}")
+    inference_parts: list[pd.DataFrame] = []
+    delta_parts: list[pd.DataFrame] = []
+    for (provider, model), group in scores.groupby(["provider", "model"], dropna=False, sort=False):
+        treatments = set(group["treatment"])
+        if not {
+            "d1_budget_matched",
+            "recursive_d2",
+        }.issubset(treatments) or not {"fixed", "adaptive_shift"}.issubset(set(group["regime"])):
+            continue
+        for metric_index, metric in enumerate(metrics):
+            contrast = d2_d1bm_post_switch_contrasts(
+                group,
+                metric=metric,
+                bootstrap_samples=bootstrap_samples,
+                permutation_samples=permutation_samples,
+                seed=seed + metric_index,
+            )
+            contrast.insert(0, "metric", metric)
+            contrast.insert(0, "model", model)
+            contrast.insert(0, "provider", provider)
+            inference_parts.append(contrast)
+            for regime in ("adaptive_shift", "fixed"):
+                deltas = paired_trajectory_deltas(
+                    group.loc[
+                        group["post_switch"].astype(bool) & (group["regime"] == regime)
+                    ],
+                    metric=metric,
+                    treatment_a="recursive_d2",
+                    treatment_b="d1_budget_matched",
+                )
+                if deltas.empty:
+                    continue
+                deltas.insert(0, "regime", regime)
+                deltas.insert(0, "metric", metric)
+                deltas.insert(0, "model", model)
+                deltas.insert(0, "provider", provider)
+                delta_parts.append(deltas)
+    if not inference_parts:
+        return pd.DataFrame(), pd.DataFrame()
+    inference = pd.concat(inference_parts, ignore_index=True)
+    inference["holm_p"] = holm_adjust(inference["permutation_p"].tolist())
+    deltas = pd.concat(delta_parts, ignore_index=True) if delta_parts else pd.DataFrame()
+    return inference, deltas
+
+
+def type_calibration_tables(
+    cases: Sequence[Mapping[str, Any]], predictions: Sequence[Mapping[str, Any]], *, bins: int = 10
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Calculate ECE/reliability from observed latent type one-vs-rest targets.
+
+    The case generator exposes an auditable active opponent type, so this is a
+    proper binary calibration target.  We intentionally do not manufacture an
+    action ECE from a probability-distribution ground truth without a realized
+    next action; action Brier/cross entropy remain separate distribution scores.
+    """
+    if bins < 1:
+        raise ValueError("bins must be positive")
+    case_by_id = {
+        str(case["case_id"]): case
+        for case in cases
+        if isinstance(case, Mapping) and "case_id" in case and "ground_truth" in case
+    }
+    if not case_by_id:
+        raise ValueError("cases must contain case_id and ground_truth")
+    summary_rows: list[dict[str, Any]] = []
+    curve_rows: list[pd.DataFrame] = []
+    grouped: dict[tuple[str, str, str, str, str], list[tuple[float, float]]] = {}
+    for prediction in predictions:
+        if not isinstance(prediction, Mapping):
+            raise TypeError("predictions must be mappings")
+        case = case_by_id.get(str(prediction.get("case_id")))
+        payload = prediction.get("payload")
+        if case is None or not isinstance(payload, Mapping):
+            raise ValueError("prediction does not match a case or lacks payload")
+        probabilities = payload.get("type_probabilities")
+        truth = case["ground_truth"]
+        if not isinstance(probabilities, Mapping) or not isinstance(truth, Mapping):
+            raise TypeError("prediction/case lacks type probabilities or truth")
+        active_type = truth.get("active_type")
+        if not isinstance(active_type, str):
+            raise TypeError("case ground truth lacks active_type")
+        for type_name, probability in probabilities.items():
+            key = (
+                str(prediction.get("provider", "")),
+                str(prediction.get("model", "")),
+                str(prediction.get("method", "")),
+                str(prediction.get("treatment", "")),
+                str(type_name),
+            )
+            grouped.setdefault(key, []).append((float(active_type == type_name), float(probability)))
+    for (provider, model, method, treatment, type_name), values in grouped.items():
+        observed = np.asarray([item[0] for item in values], dtype=float)
+        probabilities = np.asarray([item[1] for item in values], dtype=float)
+        curve = reliability_curve(observed, probabilities, bins=bins)
+        decomposition = brier_decomposition(observed, probabilities, bins=bins)
+        ece = expected_calibration_error(observed, probabilities, bins=bins)
+        prefix = {
+            "provider": provider,
+            "model": model,
+            "method": method,
+            "treatment": treatment,
+            "class": type_name,
+            "target": "observed_active_type_one_vs_rest",
+        }
+        summary_rows.append(
+            {
+                **prefix,
+                "observations": decomposition.observations,
+                "brier_score": decomposition.brier_score,
+                "ece": ece,
+                "reliability": decomposition.reliability,
+                "resolution": decomposition.resolution,
+                "uncertainty": decomposition.uncertainty,
+                "reconstructed_brier": decomposition.reconstructed_brier,
+            }
+        )
+        if not curve.empty:
+            curve_rows.append(curve.assign(**prefix))
+    return pd.DataFrame(summary_rows), (
+        pd.concat(curve_rows, ignore_index=True) if curve_rows else pd.DataFrame()
+    )
+
+
 def reliability_curve(
     observed: Sequence[float] | np.ndarray,
     probabilities: Sequence[float] | np.ndarray,

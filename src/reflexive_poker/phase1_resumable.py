@@ -23,6 +23,7 @@ from .phase1_experiment import (
     run_phase1_experiment,
 )
 from .phase1_models import ProviderBudget, ReasoningTreatment
+from .phase1_offline import OfflineBenchmarkConfig, run_offline_benchmark
 from .phase1_statistics import inference_table
 
 REQUIRED_BLOCK_FILES = (
@@ -424,7 +425,7 @@ def _ensure_model_preflight(
         "kind": "formal_model_preflight",
         "provider": provider,
         "model": model,
-        "seed": config.seeds[0],
+        "case_count": 4,
     }
     block_hash = _payload_hash(block_payload)
     final = model_dir / "preflight"
@@ -435,24 +436,17 @@ def _ensure_model_preflight(
     running, already_complete = _prepare_running(final, block_hash)
     if already_complete:
         return json.loads((final / "ATTEMPT.json").read_text(encoding="utf-8"))
-    result = run_phase1_experiment(
-        Phase1ExperimentConfig(
-            treatments=(ReasoningTreatment.STATE_ONLY,),
-            opponent_type="tag",
-            seeds=(config.seeds[0],),
-            horizon=2,
-            formation_hands=1,
-            equity_samples=1,
+    result = run_offline_benchmark(
+        OfflineBenchmarkConfig(
+            output_dir=running,
             provider=provider,
             model=model,
+            case_count=4,
             provider_budget=ProviderBudget(
                 max_calls=reserve_remaining,
-                max_primary_calls=reserve_remaining,
+                max_primary_calls=min(20, reserve_remaining),
                 max_retries=reserve_remaining,
             ),
-            bootstrap_samples=20,
-            permutation_samples=20,
-            output_dir=running,
             preregistered=True,
         )
     )
@@ -480,6 +474,7 @@ def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataF
         "horizon": config.horizon,
         "formation_hands": config.formation_hands,
         "max_calls_per_model": confirmation_plan.max_calls_per_model,
+        "offline_call_budget": confirmation_plan.offline_call_budget,
         "retry_reserve": confirmation_plan.preflight_retry_reserve,
         "code_provenance": _code_provenance(config.allow_dirty_worktree),
     }

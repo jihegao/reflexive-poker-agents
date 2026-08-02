@@ -18,6 +18,7 @@ from .environment import EnvironmentConfig, HoldemEnvironment
 from .llm_player import CodexProvider, DeterministicNarrativeProvider, OpenCodeGoProvider
 from .models import ActionType, HandRecord
 from .phase1_models import (
+    TYPE_ACTION_LIKELIHOODS,
     AbstractMCCFRPolicy,
     ApproximateEquilibriumOpponent,
     Arena,
@@ -37,8 +38,14 @@ DEFAULT_TREATMENTS = tuple(ReasoningTreatment)
 DEPTH_TREATMENTS = (
     ReasoningTreatment.STATE_ONLY,
     ReasoningTreatment.ACTION_PREDICTION,
+    ReasoningTreatment.BUDGET_MATCHED_D1,
     ReasoningTreatment.RECURSIVE_D2,
     ReasoningTreatment.RECURSIVE_D3,
+)
+PAPER_CLOSED_LOOP_TREATMENTS = (
+    ReasoningTreatment.STATE_ONLY,
+    ReasoningTreatment.BUDGET_MATCHED_D1,
+    ReasoningTreatment.RECURSIVE_D2,
 )
 CLASSIC_SIX_MAX = ("tag", "lag", "rock", "calling_station", "myopic")
 CONFIRMATION_MODELS = (
@@ -103,6 +110,7 @@ class Phase1LLMConfirmationPlan:
     selected_depth: ReasoningTreatment
     models: tuple[tuple[str, str], ...] = CONFIRMATION_MODELS
     max_calls_per_model: int = 10_000
+    offline_call_budget: int = 1_600
     preflight_retry_reserve: int = 400
     jobs: tuple[ConfirmationJob, ...] = ()
 
@@ -114,35 +122,33 @@ class Phase1LLMConfirmationPlan:
         }:
             raise ValueError("selected_depth must be D1, D2, or D3")
         experimental = sum(job.call_budget for job in self.jobs)
-        if experimental + self.preflight_retry_reserve != self.max_calls_per_model:
+        if (
+            experimental + self.offline_call_budget + self.preflight_retry_reserve
+            != self.max_calls_per_model
+        ):
             raise ValueError("confirmation job budgets must exactly match the per-model ceiling")
 
 
 def build_llm_confirmation_plan(
     selected_depth: ReasoningTreatment,
 ) -> Phase1LLMConfirmationPlan:
-    chain = DEFAULT_TREATMENTS
     heads_up = tuple(
         ConfirmationJob(
-            name=f"hu_{upper.value}_vs_{lower.value}",
+            name=f"hu_{stability.value}_paper_contrast",
             arena=Arena.HEADS_UP,
-            treatments=(lower, upper),
-            call_budget=1_600,
+            treatments=(
+                ReasoningTreatment.STATE_ONLY,
+                ReasoningTreatment.BUDGET_MATCHED_D1,
+                selected_depth,
+            ),
+            call_budget=4_000,
+            stability=stability,
         )
-        for lower, upper in itertools.pairwise(chain)
-    )
-    external = ConfirmationJob(
-        name=f"six_max_{selected_depth.value}_vs_state_only",
-        arena=Arena.SIX_MAX,
-        treatments=(ReasoningTreatment.STATE_ONLY, selected_depth),
-        call_budget=1_600,
-        opponent_composition=OpponentComposition.HETEROGENEOUS_CLASSIC,
-        stability=Stability.ADAPTIVE,
-        epsilon=0.05,
+        for stability in (Stability.FIXED, Stability.ADAPTIVE)
     )
     return Phase1LLMConfirmationPlan(
         selected_depth=selected_depth,
-        jobs=(*heads_up, external),
+        jobs=heads_up,
     )
 
 
@@ -401,10 +407,8 @@ def _mechanism_rows(
         if isinstance(hero, Phase1RuleHero):
             distribution = trace.get("action_prediction")
         else:
-            distribution = (
-                trace.get("state", {})
-                .get("bounded_opponent_model", {})
-                .get("action_prediction")
+            distribution = trace.get("provider_output", {}).get("opponent_state", {}).get(
+                "action_probabilities"
             )
         if not isinstance(distribution, dict):
             continue
@@ -435,9 +439,73 @@ def _mechanism_rows(
                 "type_probability": float("nan"),
                 "type_correct": float("nan"),
                 "model_confidence": float("nan"),
+                "type_brier": float("nan"),
+                "decision_regret": float("nan"),
             }
         )
-    for opponent, state in hero.belief_states.items():
+        true_type = next(iter(true_types.values()), None)
+        state = trace.get("state", {})
+        final_action = trace.get("final_decision", {}).get("action") or trace.get("final_action")
+        legal_actions = state.get("legal_actions", list(ActionType))
+        if true_type in TYPE_ACTION_LIKELIHOODS and final_action in legal_actions:
+            strength = float(state.get("equity_estimate", 0.5))
+            pot_odds = float(state.get("pot_odds", 0.0))
+            values = {
+                action: sum(
+                    probability
+                    * AbstractMCCFRPolicy._utility(
+                        action, opponent_action, strength, pot_odds
+                    )
+                    for opponent_action, probability in TYPE_ACTION_LIKELIHOODS[
+                        true_type
+                    ].items()
+                )
+                for action in legal_actions
+            }
+            rows.append(
+                {
+                    "seed": seed,
+                    "treatment": treatment.value,
+                    "metric": "decision_regret",
+                    "hand_index": hand_index,
+                    "log_loss": float("nan"),
+                    "brier": float("nan"),
+                    "type_probability": float("nan"),
+                    "type_correct": float("nan"),
+                    "model_confidence": float("nan"),
+                    "type_brier": float("nan"),
+                    "decision_regret": max(values.values()) - values[final_action],
+                }
+            )
+        if isinstance(hero, Phase1LLMHero) and true_type is not None:
+            opponent_state = trace.get("provider_output", {}).get("opponent_state", {})
+            type_probabilities = opponent_state.get("type_probabilities")
+            if isinstance(type_probabilities, dict) and true_type in type_probabilities:
+                rows.append(
+                    {
+                        "seed": seed,
+                        "treatment": treatment.value,
+                        "metric": "strategy_type",
+                        "hand_index": hand_index,
+                        "log_loss": float("nan"),
+                        "brier": float("nan"),
+                        "type_probability": float(type_probabilities[true_type]),
+                        "type_correct": float(
+                            max(type_probabilities, key=type_probabilities.get) == true_type
+                        ),
+                        "model_confidence": float(trace["provider_output"]["confidence"]),
+                        "type_brier": sum(
+                            (float(probability) - float(name == true_type)) ** 2
+                            for name, probability in type_probabilities.items()
+                        ),
+                        "decision_regret": float("nan"),
+                    }
+                )
+    if isinstance(hero, Phase1RuleHero):
+        belief_items = hero.belief_states.items()
+    else:
+        belief_items = ()
+    for opponent, state in belief_items:
         true_type = true_types.get(opponent)
         if true_type is None or true_type not in state.type_posterior:
             continue
@@ -453,6 +521,11 @@ def _mechanism_rows(
                 "type_probability": state.type_posterior[true_type],
                 "type_correct": float(predicted_type == true_type),
                 "model_confidence": state.confidence,
+                "type_brier": sum(
+                    (float(probability) - float(name == true_type)) ** 2
+                    for name, probability in state.type_posterior.items()
+                ),
+                "decision_regret": float("nan"),
             }
         )
     return rows
@@ -481,6 +554,7 @@ def _per_seed(per_hand: pd.DataFrame, config: Phase1ExperimentConfig) -> pd.Data
                 "raise_rate": float(group["raise_count"].sum() / max(calls, 1)),
                 "largest_abs_reward": sensitivity["largest_abs_reward"],
                 "top_1pct_abs_share": sensitivity["top_1pct_abs_share"],
+                "mean_decision_regret": float(group["decision_regret"].mean()),
                 "trimmed_1pct_chips_per_100": 100.0
                 * sensitivity["trimmed_1pct_reward"]
                 / max(1, len(group) - max(1, math.ceil(len(group) * 0.01))),
@@ -495,6 +569,7 @@ def _paired(per_seed: pd.DataFrame, treatments: tuple[ReasoningTreatment, ...]) 
     core_contrasts = (
         (ReasoningTreatment.STATE_ONLY, ReasoningTreatment.RECURSIVE_D2),
         (ReasoningTreatment.ACTION_PREDICTION, ReasoningTreatment.RECURSIVE_D2),
+        (ReasoningTreatment.BUDGET_MATCHED_D1, ReasoningTreatment.RECURSIVE_D2),
     )
     for core in core_contrasts:
         if all(treatment in treatments for treatment in core) and core not in contrasts:
@@ -515,6 +590,9 @@ def _paired(per_seed: pd.DataFrame, treatments: tuple[ReasoningTreatment, ...]) 
             pair["trimmed_1pct_chips_per_100_upper"]
             - pair["trimmed_1pct_chips_per_100_lower"]
         )
+        pair["decision_regret_reduction"] = (
+            pair["mean_decision_regret_lower"] - pair["mean_decision_regret_upper"]
+        )
         rows.append(
             pair[
                 [
@@ -526,6 +604,7 @@ def _paired(per_seed: pd.DataFrame, treatments: tuple[ReasoningTreatment, ...]) 
                     "chips_per_100_upper",
                     "chips_per_100_delta",
                     "trimmed_delta",
+                    "decision_regret_reduction",
                 ]
             ]
         )
@@ -540,6 +619,7 @@ def _paired(per_seed: pd.DataFrame, treatments: tuple[ReasoningTreatment, ...]) 
                 "chips_per_100_upper",
                 "chips_per_100_delta",
                 "trimmed_delta",
+                "decision_regret_reduction",
             ]
         )
     return pd.concat(rows, ignore_index=True)
@@ -553,6 +633,7 @@ def _paired_hand_deltas(
     core_contrasts = (
         (ReasoningTreatment.STATE_ONLY, ReasoningTreatment.RECURSIVE_D2),
         (ReasoningTreatment.ACTION_PREDICTION, ReasoningTreatment.RECURSIVE_D2),
+        (ReasoningTreatment.BUDGET_MATCHED_D1, ReasoningTreatment.RECURSIVE_D2),
     )
     for core in core_contrasts:
         if all(treatment in treatments for treatment in core) and core not in contrasts:
@@ -717,6 +798,28 @@ def _provider_gate(
         count for treatment, count in calls_by_treatment.items() if treatment != "shared_formation"
     ]
     call_count_balanced = len(set(experimental_call_counts)) <= 1
+    paired_arms_complete = all(
+        calls_by_treatment.get(treatment.value, 0) > 0 for treatment in config.treatments
+    )
+    input_tokens_by_treatment: dict[str, list[float]] = {}
+    for trace in traces:
+        treatment = trace.get("phase1_treatment") or trace.get("condition")
+        input_tokens = trace.get("input_tokens")
+        if treatment is not None and isinstance(input_tokens, int | float):
+            input_tokens_by_treatment.setdefault(str(treatment), []).append(float(input_tokens))
+    budget_match_ratio: float | None = None
+    budget_match_valid = True
+    if {
+        ReasoningTreatment.BUDGET_MATCHED_D1,
+        ReasoningTreatment.RECURSIVE_D2,
+    }.issubset(config.treatments):
+        lower = input_tokens_by_treatment.get(ReasoningTreatment.BUDGET_MATCHED_D1.value, [])
+        upper = input_tokens_by_treatment.get(ReasoningTreatment.RECURSIVE_D2.value, [])
+        if lower and upper:
+            budget_match_ratio = (sum(lower) / len(lower)) / (sum(upper) / len(upper))
+            budget_match_valid = 0.90 <= budget_match_ratio <= 1.10
+        else:
+            budget_match_valid = False
     valid = (
         forks_identical
         and ledger.unresolved_failures == 0
@@ -724,7 +827,8 @@ def _provider_gate(
         and fallbacks == 0
         and identities == {expected_identity}
         and complete_tokens
-        and call_count_balanced
+        and paired_arms_complete
+        and budget_match_valid
     )
     return {
         "applicable": True,
@@ -739,6 +843,9 @@ def _provider_gate(
         "complete_token_accounting": complete_tokens,
         "calls_by_treatment": calls_by_treatment,
         "call_count_balanced": call_count_balanced,
+        "paired_arms_complete": paired_arms_complete,
+        "budget_match_ratio": budget_match_ratio,
+        "budget_match_valid": budget_match_valid,
         "ledger": ledger.snapshot(),
     }
 
@@ -874,7 +981,21 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
             )
             completed_heroes.append(hero)
 
+    mechanisms = pd.DataFrame(mechanism_rows)
     per_hand = pd.DataFrame(per_hand_rows)
+    if not mechanisms.empty and "decision_regret" in mechanisms:
+        regret = (
+            mechanisms[mechanisms["metric"] == "decision_regret"]
+            .groupby(["seed", "treatment", "hand_index"], as_index=False)["decision_regret"]
+            .mean()
+        )
+        per_hand = per_hand.merge(
+            regret,
+            on=["seed", "treatment", "hand_index"],
+            how="left",
+        )
+    if "decision_regret" not in per_hand:
+        per_hand["decision_regret"] = float("nan")
     per_seed = _per_seed(per_hand, config)
     paired = _paired(per_seed, config.treatments)
     paired_hands = _paired_hand_deltas(per_hand, config.treatments)
@@ -884,7 +1005,6 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
         permutation_samples=config.permutation_samples,
     )
     forks = pd.DataFrame(fork_rows)
-    mechanisms = pd.DataFrame(mechanism_rows)
     if not mechanisms.empty:
         mechanism_summary = mechanisms.groupby(["treatment", "metric"], as_index=False).agg(
             observations=("hand_index", "size"),
@@ -893,6 +1013,8 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
             type_accuracy=("type_correct", "mean"),
             mean_type_probability=("type_probability", "mean"),
             mean_model_confidence=("model_confidence", "mean"),
+            mean_type_brier=("type_brier", "mean"),
+            mean_decision_regret=("decision_regret", "mean"),
         )
     else:
         mechanism_summary = pd.DataFrame(
@@ -905,6 +1027,8 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
                 "type_accuracy",
                 "mean_type_probability",
                 "mean_model_confidence",
+                "mean_type_brier",
+                "mean_decision_regret",
             ]
         )
     forks_identical = bool(forks["identical"].all()) if not forks.empty else False

@@ -1,3 +1,4 @@
+import gzip
 import json
 from pathlib import Path
 
@@ -255,6 +256,15 @@ def test_mock_llm_smoke_uses_no_reflection_and_passes_gate(tmp_path: Path) -> No
     assert {"state_only", "recursive_d2"}.issubset(
         set(result["cost_metrics"]["treatment"])
     )
+    assert "decision_regret" in result["per_hand"].columns
+    assert result["mechanism_rows"]["metric"].isin(
+        {"action_prediction", "strategy_type", "decision_regret"}
+    ).all()
+    with gzip.open(tmp_path / "decision_traces.jsonl.gz", "rt", encoding="utf-8") as handle:
+        traces = [json.loads(line) for line in handle]
+    model_traces = [row for row in traces if row.get("phase1_treatment") != "shared_formation"]
+    assert model_traces
+    assert all("opponent_state" in row["provider_output"] for row in model_traces)
 
 
 def test_phase1_matrix_has_all_frozen_cells() -> None:
@@ -270,10 +280,17 @@ def test_llm_confirmation_plan_locks_models_and_budget() -> None:
         ("opencode-go", "deepseek-v4-flash"),
         ("codex", "gpt-5.6-luna"),
     )
-    assert sum(job.call_budget for job in plan.jobs) == 9_600
+    assert sum(job.call_budget for job in plan.jobs) == 8_000
+    assert plan.offline_call_budget == 1_600
     assert plan.preflight_retry_reserve == 400
-    assert len(plan.jobs) == 6
+    assert len(plan.jobs) == 2
+    assert plan.jobs[0].stability is Stability.FIXED
     assert plan.jobs[-1].stability is Stability.ADAPTIVE
+    assert plan.jobs[-1].treatments == (
+        ReasoningTreatment.STATE_ONLY,
+        ReasoningTreatment.BUDGET_MATCHED_D1,
+        ReasoningTreatment.RECURSIVE_D2,
+    )
 
 
 def test_statistics_cover_pairing_holm_and_large_pots() -> None:
@@ -408,7 +425,7 @@ def test_llm_confirmation_recovers_running_directory_and_counts_usage(tmp_path: 
     )
     # Establish the immutable plan, then emulate a process killed during a provider call.
     run_llm_confirmation_resumable(config)
-    job = "hu_history_statistics_vs_state_only"
+    job = "hu_fixed_paper_contrast"
     running = tmp_path / "models" / "mock__mock" / "jobs" / job / "blocks" / "seed_701.running"
     running.mkdir(parents=True)
     (running / "live_provider_ledger.json").write_text(

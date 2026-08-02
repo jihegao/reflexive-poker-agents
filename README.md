@@ -122,8 +122,12 @@ The repository also contains the situated-reflection, image-shaping, and player-
 
 ## Phase 1 opponent-modeling experiment
 
+The two-stage PRBench protocol (paper-minimum Phase 1, four-model Phase 2) is documented in
+[`docs/prbench_cross_model_experiment_plan.zh-CN.md`](docs/prbench_cross_model_experiment_plan.zh-CN.md).
+
 The Phase 1 runner separates history use, action prediction, strategy-type inference,
-and auditable recursive levels D2/D3. It uses a shared formation checkpoint, paired
+the budget-matched non-recursive D1 control, and auditable recursive levels D2/D3. It
+uses a shared formation checkpoint, paired
 deck/seat seeds, bounded structured belief states, provider-call budgets, large-pot
 sensitivity checks, and a fail-closed provider gate. Existing `reflexive_on/off`
 artifacts are not relabeled as Phase 1 depth evidence.
@@ -152,6 +156,45 @@ Real-provider runs are intentionally opt-in. Validate a small zero-failure smoke
 using `--preregistered`; the checked-in defaults and 10,000-call ceilings are documented
 in `configs/phase1.yaml`. The runner never silently substitutes a provider or model.
 
+Generate the frozen offline cases plus Oracle, Uniform, Frequency, Bayesian, and HMM
+controls without model calls:
+
+```bash
+uv run expctl run start \
+  --config configs/phase1.yaml \
+  --experiment offline-baselines \
+  --request-id phase1-offline-baselines-v1 \
+  --output json
+```
+
+### Agent-friendly background control
+
+`expctl` is the stable non-interactive interface for research execution. It launches an
+independent low-priority worker, writes only to the experiment registry, emits JSON or
+JSONL, and does not use the frontend service or product database.
+
+```bash
+uv run expctl doctor --output json
+uv run expctl experiment list --output json
+uv run expctl config validate configs/phase1.yaml --output json
+
+uv run expctl run start \
+  --config configs/phase1.yaml \
+  --experiment paper-phase1 \
+  --request-id paper-phase1-formal-v1 \
+  --tag paper-phase1 \
+  --output json
+
+uv run expctl run status <run-id> --output json
+uv run expctl run logs <run-id> --follow --format jsonl
+uv run expctl analyze <run-id> --output json
+uv run expctl export <run-id> --format tar.gz --output json
+```
+
+`run pause`, `run resume`, and `run stop` expose the same machine-readable state
+contract. Reusing a `--request-id` is idempotent; using it with a different config or
+experiment fails with `IDEMPOTENCY_CONFLICT`.
+
 ### Resumable formal runs
 
 The formal executors checkpoint rule experiments per cell/seed and LLM experiments per
@@ -173,7 +216,7 @@ PYTHONPATH=src uv run python scripts/run_phase1_resumable.py simulation \
   --output results/phase1/full_simulation
 ```
 
-Start or resume the dual-model confirmation only after selecting the simulation winner:
+Start or resume the preregistered dual-model Heads-up confirmation:
 
 ```bash
 PYTHONPATH=src uv run python scripts/run_phase1_resumable.py llm \

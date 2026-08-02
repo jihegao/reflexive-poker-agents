@@ -3,7 +3,7 @@ protocol: reflexive-poker-phase1-v1
 evidence_layers:
   simulation:
     heads_up:
-      treatments: [state_only, history_statistics, action_prediction, strategy_type, recursive_d2, recursive_d3]
+      treatments: [state_only, history_statistics, action_prediction, d1_budget_matched, strategy_type, recursive_d2, recursive_d3]
       opponent_types: [rock, tag, lag, calling_station, myopic]
       epsilon: [0.05, 0.35]
       stability: [fixed, midpoint_shift]
@@ -14,7 +14,7 @@ evidence_layers:
         adaptive: {base_types: [rock, tag, lag, calling_station, myopic], epsilon: [0.05, 0.35]}
         approximate_equilibrium: {stability: fixed, epsilon: [0.05, 0.35]}
     six_max:
-      treatments: [state_only, action_prediction, recursive_d2, recursive_d3]
+      treatments: [state_only, action_prediction, d1_budget_matched, recursive_d2, recursive_d3]
       compositions: [homogeneous_tag, heterogeneous_classic]
       epsilon: [0.05, 0.35]
       stability: [fixed, adaptive]
@@ -28,9 +28,42 @@ evidence_layers:
       - provider: codex
         model: gpt-5.6-luna
     max_calls_per_model: 10000
+    offline_understanding_calls: 1600
     heads_up_contrast_calls: 8000
-    six_max_external_validation_calls: 1600
+    six_max_external_validation_calls: 0
     preflight_and_retry_reserve: 400
+paper_phase1:
+  claim_boundary: opponent_state_estimation_and_counterfactual_decision_quality
+  case_count: 200
+  preflight_cases: 4
+  base_seed: 20260802
+  treatments: [state_only, action_prediction, d1_budget_matched, recursive_d2, recursive_d3]
+  models:
+    - provider: opencode-go
+      model: deepseek-v4-flash
+    - provider: codex
+      model: gpt-5.6-luna
+  offline_budget:
+    max_calls: 1200
+    max_primary_calls: 1000
+    max_retries: 200
+  closed_loop:
+    treatments: [state_only, d1_budget_matched, recursive_d2]
+    regimes: [fixed, adaptive]
+    opponent_type: tag
+    seed_start: 9700
+    seed_count: 40
+    hands: 20
+    formation_hands: 5
+    equity_samples: 8
+  execution_isolation:
+    registry_root: results/experiments
+    background_process: true
+    max_workers: 1
+    cpu_threads_per_worker: 1
+    frontend_database_access: false
+    product_api_dependency: false
+    automatic_strategy_promotion: false
 provider_gate:
   max_schema_retries_per_decision: 1
   require_zero_unresolved_failures: true

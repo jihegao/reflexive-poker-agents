@@ -45,6 +45,7 @@ class ReasoningTreatment(str, Enum):
     STATE_ONLY = "state_only"
     HISTORY_STATISTICS = "history_statistics"
     ACTION_PREDICTION = "action_prediction"
+    BUDGET_MATCHED_D1 = "d1_budget_matched"
     STRATEGY_TYPE = "strategy_type"
     RECURSIVE_D2 = "recursive_d2"
     RECURSIVE_D3 = "recursive_d3"
@@ -55,6 +56,7 @@ class ReasoningTreatment(str, Enum):
             self.STATE_ONLY: 0,
             self.HISTORY_STATISTICS: 0,
             self.ACTION_PREDICTION: 1,
+            self.BUDGET_MATCHED_D1: 1,
             self.STRATEGY_TYPE: 1,
             self.RECURSIVE_D2: 2,
             self.RECURSIVE_D3: 3,
@@ -71,6 +73,62 @@ TYPE_ACTION_LIKELIHOODS: dict[str, dict[str, float]] = {
     "myopic": {"fold": 0.30, "check_call": 0.50, "raise": 0.20},
     "adaptive": {"fold": 0.28, "check_call": 0.44, "raise": 0.28},
 }
+
+_PROBABILITY_SCHEMA = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+PHASE1_DECISION_SCHEMA: dict[str, Any] = copy.deepcopy(DECISION_SCHEMA)
+PHASE1_DECISION_SCHEMA["required"] = [*DECISION_SCHEMA["required"], "opponent_state"]
+PHASE1_DECISION_SCHEMA["properties"]["opponent_state"] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "type_probabilities",
+        "action_probabilities",
+        "hero_image_aggression",
+        "adaptation_probability",
+        "switch_detected",
+    ],
+    "properties": {
+        "type_probabilities": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(MODEL_TYPES),
+            "properties": {name: dict(_PROBABILITY_SCHEMA) for name in MODEL_TYPES},
+        },
+        "action_probabilities": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(ACTION_NAMES),
+            "properties": {name: dict(_PROBABILITY_SCHEMA) for name in ACTION_NAMES},
+        },
+        "hero_image_aggression": dict(_PROBABILITY_SCHEMA),
+        "adaptation_probability": dict(_PROBABILITY_SCHEMA),
+        "switch_detected": {"type": "boolean"},
+    },
+}
+
+
+def validate_phase1_decision(payload: dict[str, Any]) -> None:
+    _validate_payload(payload, DECISION_SCHEMA)
+    opponent_state = payload.get("opponent_state")
+    if not isinstance(opponent_state, dict):
+        raise TypeError("opponent_state must be an object")
+    for field_name, names in (
+        ("type_probabilities", MODEL_TYPES),
+        ("action_probabilities", ACTION_NAMES),
+    ):
+        values = opponent_state.get(field_name)
+        if not isinstance(values, dict) or set(values) != set(names):
+            raise ValueError(f"{field_name} must contain exactly {names}")
+        probabilities = [float(values[name]) for name in names]
+        if any(value < 0.0 or value > 1.0 for value in probabilities):
+            raise ValueError(f"{field_name} contains a value outside [0, 1]")
+        if not math.isclose(sum(probabilities), 1.0, abs_tol=1e-5):
+            raise ValueError(f"{field_name} must sum to one")
+    for field_name in ("hero_image_aggression", "adaptation_probability"):
+        if not 0.0 <= float(opponent_state[field_name]) <= 1.0:
+            raise ValueError(f"{field_name} must be in [0, 1]")
+    if not isinstance(opponent_state.get("switch_detected"), bool):
+        raise TypeError("switch_detected must be boolean")
 
 
 @dataclass
@@ -303,7 +361,12 @@ class BudgetedRetryProvider:
         ):
             raise ValueError("provider output token cap exceeded")
 
-    def decide(self, state: dict[str, Any]) -> ProviderResponse:
+    def _execute(
+        self,
+        request: Any,
+        schema: dict[str, Any],
+        validator: Any | None = None,
+    ) -> ProviderResponse:
         last_error: Exception | None = None
         for attempt in range(2):
             retry = attempt == 1
@@ -313,10 +376,13 @@ class BudgetedRetryProvider:
                 self.ledger.retries += 1
             self._checkpoint()
             try:
-                response = self.provider.decide(state)
+                response = request()
                 self._record(response)
                 self._checkpoint()
-                _validate_payload(response.payload, DECISION_SCHEMA)
+                if schema is DECISION_SCHEMA:
+                    _validate_payload(response.payload, schema)
+                elif validator is not None:
+                    validator(response.payload)
                 return response
             except ProviderBudgetExceeded:
                 raise
@@ -328,6 +394,29 @@ class BudgetedRetryProvider:
         self._checkpoint()
         assert last_error is not None
         raise last_error
+
+    def decide(self, state: dict[str, Any]) -> ProviderResponse:
+        return self._execute(lambda: self.provider.decide(state), DECISION_SCHEMA)
+
+    def structured(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema_name: str,
+        schema: dict[str, Any],
+        validator: Any | None = None,
+    ) -> ProviderResponse:
+        return self._execute(
+            lambda: self.provider.structured(
+                instructions=instructions,
+                state=state,
+                schema_name=schema_name,
+                schema=schema,
+            ),
+            schema,
+            validator,
+        )
 
     def reflect(self, state: dict[str, Any]) -> ProviderResponse:
         raise RuntimeError("Phase 1 uses deterministic belief updates, not LLM reflection calls")
@@ -386,6 +475,7 @@ class TreatmentStateMixin:
             "opponent_view_of_hero": masked,
             "conditional_response_model": masked,
             "anticipated_adjustment": masked,
+            "budget_match_control": masked,
         }
         if self.treatment is not ReasoningTreatment.STATE_ONLY:
             features["history_statistics"] = {
@@ -393,10 +483,29 @@ class TreatmentStateMixin:
             }
         if self.treatment in {
             ReasoningTreatment.ACTION_PREDICTION,
+            ReasoningTreatment.BUDGET_MATCHED_D1,
             ReasoningTreatment.RECURSIVE_D2,
             ReasoningTreatment.RECURSIVE_D3,
         }:
             features["action_prediction"] = aggregate["action_distribution"]
+        if self.treatment is ReasoningTreatment.BUDGET_MATCHED_D1:
+            target = {
+                **features,
+                "strategy_type": aggregate["type_posterior"],
+                "opponent_view_of_hero": aggregate["hero_public_image"],
+                "conditional_response_model": aggregate["conditional_response_model"],
+                "budget_match_control": masked,
+            }
+            features["budget_match_control"] = ""
+            target_length = len(
+                json.dumps(target, sort_keys=True, separators=(",", ":"))
+            )
+            control_length = len(
+                json.dumps(features, sort_keys=True, separators=(",", ":"))
+            )
+            features["budget_match_control"] = "0" * max(
+                0, target_length - control_length
+            )
         if self.treatment in {
             ReasoningTreatment.STRATEGY_TYPE,
             ReasoningTreatment.RECURSIVE_D2,
@@ -448,7 +557,10 @@ class Phase1RuleHero(TreatmentStateMixin, PokerAgent):
         shift = 0.0
         if self.treatment is ReasoningTreatment.HISTORY_STATISTICS:
             shift = 0.04 * (aggregate["confidence"] - 0.5)
-        elif self.treatment is ReasoningTreatment.ACTION_PREDICTION:
+        elif self.treatment in {
+            ReasoningTreatment.ACTION_PREDICTION,
+            ReasoningTreatment.BUDGET_MATCHED_D1,
+        }:
             shift = 0.20 * (aggregate["action_distribution"]["fold"] - 1.0 / 3.0)
         elif self.treatment is ReasoningTreatment.STRATEGY_TYPE:
             type_aggression = {"rock": 0.18, "tag": 0.43, "lag": 0.72, "calling_station": 0.22, "myopic": 0.47, "adaptive": 0.50}
@@ -553,20 +665,109 @@ class Phase1LLMHero(TreatmentStateMixin, LLMPlayer):
         }
 
     def act(self, context: DecisionContext) -> Decision:
-        decision = super().act(context)
-        trace = self.decision_traces[-1]
-        trace.update(
-            {
-                "phase1_treatment": self.treatment.value,
-                "reasoning_depth": self.treatment.depth,
-                "belief_state_hash": self.belief_digest(),
-                "budget": (
-                    self.provider.ledger.snapshot()
-                    if isinstance(self.provider, BudgetedRetryProvider)
-                    else None
+        equity = estimate_equity(
+            context.hole_cards,
+            context.board,
+            context.active_players - 1,
+            self.rng,
+            samples=self.style.equity_samples,
+        )
+        fallback = self._policy(
+            context,
+            aggression_shift=0.0,
+            reasoning_depth=self.treatment.depth,
+            predicted_all_fold=None,
+            metadata={"phase": "phase1_llm_fallback"},
+        )
+        state = self._decision_state(context, equity)
+        error: str | None = None
+        response: ProviderResponse | None = None
+        try:
+            request = {
+                "instructions": (
+                    "Choose one legal action in the reproducible poker simulator and return a "
+                    "calibrated structured opponent-state estimate. Use only unmasked fields. "
+                    "Return concise audit fields and never provide hidden chain-of-thought."
                 ),
+                "state": state,
+                "schema_name": "phase1_closed_loop_decision",
+                "schema": PHASE1_DECISION_SCHEMA,
+            }
+            if isinstance(self.provider, BudgetedRetryProvider):
+                response = self.provider.structured(
+                    **request,
+                    validator=validate_phase1_decision,
+                )
+            else:
+                response = self.provider.structured(**request)
+            validate_phase1_decision(response.payload)
+            decision, error = self._decision_from_payload(response.payload, context, fallback)
+            if error:
+                self.illegal_action_count += 1
+                self.invalid_actions += 1
+        except Exception as exc:  # noqa: BLE001 - failure is retained in the evidence trace.
+            self.provider_failures += 1
+            error = f"{type(exc).__name__}: {exc}"
+            decision = fallback
+        aggregate = self._aggregate_belief(context.opponents)
+        payload = (
+            response.payload
+            if response is not None
+            else {
+                "action": fallback.action.value,
+                "raise_scale": 0.5,
+                "confidence": 0.0,
+                "situation_summary": "provider failure; fallback policy used",
+                "rationale": "provider output unavailable",
+                "self_model": "unavailable",
+                "opponent_model": "unavailable",
+                "risk_flags": ["provider_failure"],
+                "next_step": "retry provider on next decision",
+                "opponent_state": {
+                    "type_probabilities": aggregate["type_posterior"],
+                    "action_probabilities": aggregate["action_distribution"],
+                    "hero_image_aggression": aggregate["hero_public_image"],
+                    "adaptation_probability": 0.0,
+                    "switch_detected": False,
+                },
             }
         )
+        trace = {
+            "trace_type": "decision",
+            "hand_index": context.hand_index,
+            "street": context.street.value,
+            "agent": self.name,
+            "condition": self.condition,
+            "state": state,
+            "provider_output": payload,
+            "final_decision": {
+                "action": decision.action.value,
+                "raise_scale": decision.raise_scale,
+                "fallback_used": error is not None,
+                "error": error,
+            },
+            "provider": response.provider if response else self.provider.name,
+            "model": response.model if response else self.provider.model,
+            "latency_ms": response.latency_ms if response else None,
+            "input_tokens": response.input_tokens if response else None,
+            "output_tokens": response.output_tokens if response else None,
+            "total_tokens": response.total_tokens if response else None,
+            "cost_usd": response.cost_usd if response else None,
+            "response_id": response.response_id if response else None,
+            "phase1_treatment": self.treatment.value,
+            "reasoning_depth": self.treatment.depth,
+            "belief_state_hash": self.belief_digest(),
+            "budget": (
+                self.provider.ledger.snapshot()
+                if isinstance(self.provider, BudgetedRetryProvider)
+                else None
+            ),
+        }
+        trace["final_action"] = decision.action.value
+        trace["output"] = payload
+        self.decision_traces.append(trace)
+        self._hand_decisions.setdefault(context.hand_index, []).append(trace)
+        self._write_jsonl("decision_traces.jsonl", trace)
         return decision
 
     def observe_action(self, event: ActionEvent) -> None:

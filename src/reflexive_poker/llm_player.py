@@ -90,6 +90,15 @@ class LLMProvider(Protocol):
 
     def reflect(self, state: dict[str, Any]) -> ProviderResponse: ...
 
+    def structured(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> ProviderResponse: ...
+
 
 class OpenAIResponsesProvider:
     """OpenAI Responses API adapter using strict Structured Outputs.
@@ -198,6 +207,21 @@ class OpenAIResponsesProvider:
             state=state,
             schema_name="poker_reflection",
             schema=REFLECTION_SCHEMA,
+        )
+
+    def structured(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> ProviderResponse:
+        return self._call(
+            instructions=instructions,
+            state=state,
+            schema_name=schema_name,
+            schema=schema,
         )
 
 
@@ -356,6 +380,21 @@ class OpenCodeGoProvider:
             schema=REFLECTION_SCHEMA,
         )
 
+    def structured(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> ProviderResponse:
+        return self._call(
+            instructions=instructions,
+            state=state,
+            schema_name=schema_name,
+            schema=schema,
+        )
+
 
 class CodexProvider:
     """Codex CLI provider using the locally authenticated account and JSON Schema output."""
@@ -493,6 +532,17 @@ class CodexProvider:
             state=state,
             schema=REFLECTION_SCHEMA,
         )
+
+    def structured(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> ProviderResponse:
+        del schema_name
+        return self._call(instructions=instructions, state=state, schema=schema)
 
 
 class DeterministicNarrativeProvider:
@@ -639,6 +689,54 @@ class DeterministicNarrativeProvider:
             output_tokens=len(text) // 4,
             total_tokens=(len(json.dumps(state, ensure_ascii=False)) + len(text)) // 4,
             response_id=f"mock-reflection-{state['hand_index']}",
+        )
+
+    def structured(
+        self,
+        *,
+        instructions: str,
+        state: dict[str, Any],
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> ProviderResponse:
+        del instructions, schema
+        if schema_name != "phase1_closed_loop_decision":
+            raise ValueError(f"deterministic mock does not implement schema {schema_name}")
+        base = self.decide(state)
+        bounded = state.get("bounded_opponent_model", {})
+        type_probabilities = bounded.get("strategy_type")
+        if not isinstance(type_probabilities, dict):
+            names = ("rock", "tag", "lag", "calling_station", "myopic", "adaptive")
+            type_probabilities = {name: 1.0 / len(names) for name in names}
+        action_probabilities = bounded.get("action_prediction")
+        if not isinstance(action_probabilities, dict):
+            action_probabilities = {name: 1.0 / 3.0 for name in ("fold", "check_call", "raise")}
+        hero_image = bounded.get("opponent_view_of_hero")
+        if not isinstance(hero_image, int | float):
+            hero_image = 0.5
+        adjustment = bounded.get("anticipated_adjustment")
+        if not isinstance(adjustment, int | float):
+            adjustment = 0.0
+        payload = {
+            **base.payload,
+            "opponent_state": {
+                "type_probabilities": type_probabilities,
+                "action_probabilities": action_probabilities,
+                "hero_image_aggression": float(hero_image),
+                "adaptation_probability": min(1.0, abs(float(adjustment))),
+                "switch_detected": abs(float(adjustment)) > 0.25,
+            },
+        }
+        text = json.dumps(payload, ensure_ascii=False)
+        return ProviderResponse(
+            payload=payload,
+            provider=base.provider,
+            model=base.model,
+            latency_ms=base.latency_ms,
+            input_tokens=base.input_tokens,
+            output_tokens=len(text) // 4,
+            total_tokens=(base.input_tokens or 0) + len(text) // 4,
+            response_id=base.response_id,
         )
 
 

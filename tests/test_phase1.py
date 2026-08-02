@@ -1,5 +1,6 @@
 import gzip
 import json
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -470,7 +471,17 @@ def test_mock_llm_confirmation_resumes_without_repeating_attempts(tmp_path: Path
         (tmp_path / "models" / "mock__mock" / "preflight" / "ATTEMPT.json").read_text()
     )["valid"]
     source_provenance = json.loads((tmp_path / "SOURCE_PROVENANCE.json").read_text())
-    assert source_provenance["worktree_dirty"]
+    repository = Path(__file__).resolve().parents[1]
+    actual_worktree_dirty = bool(
+        subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    assert source_provenance["worktree_dirty"] is actual_worktree_dirty
     assert source_provenance["protocol_semantics_id"] == "prbench-cross-model-v1"
     assert (tmp_path / source_provenance["source_snapshot"]).exists()
     second = run_llm_confirmation_resumable(config)

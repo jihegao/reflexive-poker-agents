@@ -19,6 +19,58 @@ def _slug(provider: str, model: str) -> str:
     return f"{provider}__{model}".replace("/", "_").replace(".", "_")
 
 
+def _valid_phase2_pricing(
+    pricing: dict[str, Any], systems: list[Any], protocol: str
+) -> bool:
+    """Accept a frozen four-system price input, never a generic placeholder."""
+    if pricing.get("schema_version") != 1 or pricing.get("protocol") != protocol:
+        return False
+    if pricing.get("frozen") is not True or not isinstance(pricing.get("frozen_at_utc"), str):
+        return False
+    entries = pricing.get("entries")
+    if not isinstance(entries, list):
+        return False
+    expected = {
+        (str(system.get("provider")), str(system.get("model")))
+        for system in systems
+        if isinstance(system, dict)
+    }
+    observed = {
+        (str(entry.get("provider")), str(entry.get("model")))
+        for entry in entries
+        if isinstance(entry, dict)
+    }
+    if observed != expected:
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        mode = entry.get("cost_observability")
+        if mode not in {"exact", "estimated", "unavailable"}:
+            return False
+        if mode == "estimated" and not isinstance(entry.get("rates_usd_per_million"), dict):
+            return False
+        if mode == "unavailable" and not isinstance(entry.get("unavailable_reason"), str):
+            return False
+    return True
+
+
+def _valid_power_analysis(
+    power: dict[str, Any], protocol: str, frozen_design: dict[str, Any]
+) -> bool:
+    """Require a power artifact tied to the already locked Phase 2 design."""
+    return bool(
+        power.get("valid")
+        and power.get("protocol") == protocol
+        and power.get("analysis_unit") == "paired_seed_block"
+        and power.get("paired_seed_count") == frozen_design.get("paired_seed_count")
+        and power.get("heads_up_hands") == frozen_design.get("heads_up_hands")
+        and isinstance(power.get("method"), str)
+        and isinstance(power.get("phase1_outcome_lock"), str)
+        and power.get("phase1_outcome_lock") == frozen_design.get("phase1_outcome_lock")
+    )
+
+
 def audit_phase2_readiness(
     output_dir: Path,
     *,
@@ -88,15 +140,17 @@ def audit_phase2_readiness(
             for item in identity_locks.values()
         )
     )
-    pricing_complete = bool(pricing.get("frozen")) and bool(pricing.get("entries"))
+    pricing_complete = _valid_phase2_pricing(pricing, systems, protocol)
     design_complete = (
         frozen_design.get("status") == "frozen"
+        and isinstance(frozen_design.get("phase1_outcome_lock"), str)
+        and bool(frozen_design["phase1_outcome_lock"])
         and isinstance(frozen_design.get("heads_up_hands"), int)
         and isinstance(frozen_design.get("paired_seed_count"), int)
         and frozen_design["heads_up_hands"] > 20
         and frozen_design["paired_seed_count"] > 40
     )
-    power_complete = bool(power.get("valid")) and power.get("protocol") == protocol
+    power_complete = _valid_power_analysis(power, protocol, frozen_design)
     ready = all(
         (
             preflight_complete,

@@ -317,6 +317,13 @@ serving systems、全部五个理解处理条件，以及异质 Six-max 外部�
 gate；它不运行任何 Phase 2 outcome，因此不能把这次预检误作完整横评或已接入的
 Six-max 证据。
 
+实现边界：`paper-phase2-offline` 已提供为 fail-closed 的四系统离线 runner，但必须
+显式传入冻结的四系统 preflight、价格清单和与已锁定 Phase 1 evidence bundle 绑定的
+paired-seed 功效分析；任一输入缺失时不会发起 outcome 调用。Six-max 同样已提供
+全 treatment、paired seed、真实 seat mirror、shared formation hash 和大底池稳健性
+分析接口，但 treatment-aware prompt/闭环 arm runner 必须在 Phase 1 outcome lock 后
+冻结，不能把旧的 `reflexive_enabled` mock pilot 重新标注为 D0--D3 证据。
+
 ### Agent-friendly CLI 与前端隔离
 
 研究实验不进入前端请求链路。`expctl` 只提交独立后台 worker，并将状态、事件、检查点和结果写入独立 registry：

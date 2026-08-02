@@ -170,17 +170,24 @@ def test_budgeted_provider_counts_repair_and_fails_closed() -> None:
 
 def test_provider_ledger_is_checkpointed_before_and_after_calls(tmp_path: Path) -> None:
     checkpoint = tmp_path / "live_provider_ledger.json"
+    attempts = tmp_path / "live_provider_attempts.jsonl"
     provider = BudgetedRetryProvider(
         _FlakyProvider(),
         ProviderBudget(max_calls=2, max_primary_calls=1, max_retries=1),
         ProviderLedger(),
         checkpoint_path=checkpoint,
+        attempt_log_path=attempts,
     )
     provider.decide({})
     payload = json.loads(checkpoint.read_text())
     assert payload["ledger"]["calls"] == 2
     assert payload["ledger"]["retries"] == 1
     assert payload["ledger"]["raw_failures"] == 1
+    records = [json.loads(line) for line in attempts.read_text().splitlines()]
+    assert [(row["outcome"], row["retry"]) for row in records] == [
+        ("failed", False),
+        ("succeeded", True),
+    ]
 
 
 def test_shared_formation_fork_signature_is_identical() -> None:

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import time
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -284,6 +285,7 @@ class BudgetedRetryProvider:
         budget: ProviderBudget,
         ledger: ProviderLedger | None = None,
         checkpoint_path: Path | None = None,
+        attempt_log_path: Path | None = None,
     ) -> None:
         self.provider = provider
         self.budget = budget
@@ -291,6 +293,7 @@ class BudgetedRetryProvider:
         self.name = provider.name
         self.model = provider.model
         self.checkpoint_path = checkpoint_path
+        self.attempt_log_path = attempt_log_path
 
     def _checkpoint(self) -> None:
         if self.checkpoint_path is None:
@@ -307,6 +310,29 @@ class BudgetedRetryProvider:
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         os.replace(temporary, self.checkpoint_path)
+
+    def _append_attempt(self, payload: dict[str, Any]) -> None:
+        """Append one completed provider attempt before continuing or retrying.
+
+        This is intentionally separate from the aggregate ledger: a count of
+        failures cannot establish what was retried or whether an error was
+        silently hidden.  ``fsync`` makes each attempt survive an interrupted
+        background worker just like the live prediction journal.
+        """
+        if self.attempt_log_path is None:
+            return
+        self.attempt_log_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "schema_version": 1,
+            "timestamp_unix_ms": round(time.time() * 1000),
+            "provider": self.name,
+            "model": self.model,
+            **payload,
+        }
+        with self.attempt_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def __deepcopy__(self, memo: dict[int, Any]) -> BudgetedRetryProvider:
         del memo
@@ -383,6 +409,14 @@ class BudgetedRetryProvider:
                     _validate_payload(response.payload, schema)
                 elif validator is not None:
                     validator(response.payload)
+                self._append_attempt(
+                    {
+                        "call_number": self.ledger.calls,
+                        "retry": retry,
+                        "outcome": "succeeded",
+                        "response_id": response.response_id,
+                    }
+                )
                 return response
             except ProviderBudgetExceeded:
                 raise
@@ -390,6 +424,15 @@ class BudgetedRetryProvider:
                 self.ledger.raw_failures += 1
                 last_error = exc
                 self._checkpoint()
+                self._append_attempt(
+                    {
+                        "call_number": self.ledger.calls,
+                        "retry": retry,
+                        "outcome": "failed",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc)[:1000],
+                    }
+                )
         self.ledger.unresolved_failures += 1
         self._checkpoint()
         assert last_error is not None

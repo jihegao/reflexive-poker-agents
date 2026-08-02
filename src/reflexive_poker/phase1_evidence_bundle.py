@@ -188,8 +188,10 @@ def _provider_status(path: Path, *, expected_predictions: int) -> dict[str, Any]
         "gate_valid": bool(gate.get("valid")),
         "expected_predictions": expected_predictions,
         "raw_predictions": observed,
+        "attempt_audit": gate.get("attempt_audit", {}),
         "complete": (
             bool(gate.get("valid"))
+            and bool(gate.get("attempt_audit", {}).get("valid"))
             and observed == expected_predictions
             and coverage["valid"]
             and provenance["source_provenance_present"]

@@ -723,6 +723,7 @@ def model_predictions(
         config.provider_budget,
         ledger,
         checkpoint_path=config.output_dir / "live_provider_ledger.json",
+        attempt_log_path=config.output_dir / "live_provider_attempts.jsonl",
     )
     for case in cases:
         for treatment in config.treatments:
@@ -874,6 +875,35 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def _attempt_audit(path: Path, ledger: ProviderLedger, *, applicable: bool) -> dict[str, Any]:
+    if not applicable:
+        return {"applicable": False, "valid": True, "attempts": 0, "raw_failures": 0}
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    rows.append(json.loads(line))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"applicable": True, "valid": False, "attempts": 0, "raw_failures": 0}
+    failures = sum(row.get("outcome") == "failed" for row in rows)
+    retries = sum(bool(row.get("retry")) for row in rows)
+    valid = (
+        len(rows) == ledger.calls
+        and failures == ledger.raw_failures
+        and retries == ledger.retries
+        and all(row.get("outcome") in {"succeeded", "failed"} for row in rows)
+    )
+    return {
+        "applicable": True,
+        "valid": valid,
+        "path": str(path),
+        "attempts": len(rows),
+        "raw_failures": failures,
+        "retries": retries,
+    }
+
+
 def _report(config: OfflineBenchmarkConfig, summary: pd.DataFrame, gate: dict[str, Any]) -> str:
     lines = [
         "# Phase 1 离线对手理解基准",
@@ -963,6 +993,11 @@ def run_offline_benchmark(config: OfflineBenchmarkConfig) -> dict[str, Any]:
     observed_model_predictions = sum(row["method"].startswith("llm_") for row in predictions)
     model_rows = [row for row in predictions if row["method"].startswith("llm_")]
     observed_identities = sorted({(row["provider"], row["model"]) for row in model_rows})
+    attempt_audit = _attempt_audit(
+        config.output_dir / "live_provider_attempts.jsonl",
+        ledger,
+        applicable=config.provider not in {"baselines", "mock"},
+    )
     observed_actual_models = sorted(
         {str(row["actual_model"]) for row in model_rows if row.get("actual_model")}
     )
@@ -1020,6 +1055,7 @@ def run_offline_benchmark(config: OfflineBenchmarkConfig) -> dict[str, Any]:
             and complete_cost_observability
             and actual_identity_matches
             and identity_source_valid
+            and attempt_audit["valid"]
         ),
         "provider": config.provider,
         "model": config.model,
@@ -1036,6 +1072,7 @@ def run_offline_benchmark(config: OfflineBenchmarkConfig) -> dict[str, Any]:
         "complete_model_version_attestation": complete_model_version_attestation,
         "complete_token_accounting": complete_token_accounting,
         "complete_cost_observability": complete_cost_observability,
+        "attempt_audit": attempt_audit,
         "ledger": ledger.snapshot(),
     }
     if config.provider in {"baselines", "mock"}:

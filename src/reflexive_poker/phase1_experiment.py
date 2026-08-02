@@ -1009,6 +1009,7 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
             config.provider_budget,
             ledger,
             checkpoint_path=config.output_dir / "live_provider_ledger.json",
+            attempt_log_path=config.output_dir / "live_provider_attempts.jsonl",
         )
 
     per_hand_rows: list[dict[str, Any]] = []

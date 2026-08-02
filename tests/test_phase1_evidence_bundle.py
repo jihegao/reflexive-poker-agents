@@ -9,7 +9,9 @@ from reflexive_poker.phase1_evidence_bundle import audit_phase1_evidence_bundle
 
 def _artifact(path: Path, *, valid: bool, predictions: int) -> None:
     path.mkdir(parents=True)
-    (path / "provider_gate.json").write_text(json.dumps({"valid": valid}), encoding="utf-8")
+    (path / "provider_gate.json").write_text(
+        json.dumps({"valid": valid, "attempt_audit": {"valid": True}}), encoding="utf-8"
+    )
     (path / "run.json").write_text(json.dumps({"run_id": path.name, "config_hash": "frozen"}), encoding="utf-8")
     (path / "SOURCE_PROVENANCE.json").write_text(
         json.dumps(

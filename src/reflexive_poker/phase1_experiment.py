@@ -137,7 +137,14 @@ class Phase1LLMConfirmationPlan:
 
 def build_llm_confirmation_plan(
     selected_depth: ReasoningTreatment,
+    *,
+    max_calls_per_model: int = 10_000,
+    offline_call_budget: int = 1_600,
+    preflight_retry_reserve: int = 400,
+    heads_up_contrast_calls: int = 8_000,
 ) -> Phase1LLMConfirmationPlan:
+    if heads_up_contrast_calls <= 0 or heads_up_contrast_calls % 2:
+        raise ValueError("heads_up_contrast_calls must be a positive even number")
     heads_up = tuple(
         ConfirmationJob(
             name=f"hu_{stability.value}_paper_contrast",
@@ -147,15 +154,21 @@ def build_llm_confirmation_plan(
                 ReasoningTreatment.BUDGET_MATCHED_D1,
                 selected_depth,
             ),
-            call_budget=4_000,
+            call_budget=heads_up_contrast_calls // 2,
             stability=stability,
         )
         for stability in (Stability.FIXED, Stability.ADAPTIVE)
     )
-    return Phase1LLMConfirmationPlan(
+    plan = Phase1LLMConfirmationPlan(
         selected_depth=selected_depth,
+        max_calls_per_model=max_calls_per_model,
+        offline_call_budget=offline_call_budget,
+        preflight_retry_reserve=preflight_retry_reserve,
         jobs=heads_up,
     )
+    if heads_up_contrast_calls != sum(job.call_budget for job in plan.jobs):
+        raise ValueError("heads_up_contrast_calls does not match the job allocation")
+    return plan
 
 
 def write_llm_confirmation_plan(

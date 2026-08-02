@@ -545,6 +545,18 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                 horizon=int(closed.get("hands", 20)),
                 formation_hands=int(closed.get("formation_hands", 5)),
                 equity_samples=int(closed.get("equity_samples", 8)),
+                max_calls_per_model=int(
+                    config.get("llm_confirmation", {}).get("max_calls_per_model", 10_000)
+                ),
+                offline_call_budget=int(
+                    config.get("llm_confirmation", {}).get("offline_understanding_calls", 1_600)
+                ),
+                preflight_retry_reserve=int(
+                    config.get("llm_confirmation", {}).get("preflight_and_retry_reserve", 400)
+                ),
+                heads_up_contrast_calls=int(
+                    config.get("llm_confirmation", {}).get("heads_up_contrast_calls", 8_000)
+                ),
                 max_primary_calls_per_paired_block=int(
                     closed.get("max_primary_calls_per_paired_block", 100)
                 ),

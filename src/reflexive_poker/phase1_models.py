@@ -402,7 +402,7 @@ class BudgetedRetryProvider:
                 self.ledger.retries += 1
             self._checkpoint()
             try:
-                response = request()
+                response = request(retry, last_error)
                 self._record(response)
                 self._checkpoint()
                 if schema is DECISION_SCHEMA:
@@ -439,7 +439,9 @@ class BudgetedRetryProvider:
         raise last_error
 
     def decide(self, state: dict[str, Any]) -> ProviderResponse:
-        return self._execute(lambda: self.provider.decide(state), DECISION_SCHEMA)
+        return self._execute(
+            lambda _retry, _last_error: self.provider.decide(state), DECISION_SCHEMA
+        )
 
     def structured(
         self,
@@ -450,13 +452,25 @@ class BudgetedRetryProvider:
         schema: dict[str, Any],
         validator: Any | None = None,
     ) -> ProviderResponse:
-        return self._execute(
-            lambda: self.provider.structured(
-                instructions=instructions,
+        def request(retry: bool, last_error: Exception | None) -> ProviderResponse:
+            repair = ""
+            if retry:
+                repair = (
+                    "\n\nREPAIR REQUIRED: the prior response failed validation"
+                    f" ({type(last_error).__name__}: {last_error}). Return a fresh JSON object. "
+                    "Every probability field must be numeric in [0, 1]; "
+                    "type_probabilities (six values) and action_probabilities (three values) "
+                    "must each sum to exactly 1.0."
+                )
+            return self.provider.structured(
+                instructions=instructions + repair,
                 state=state,
                 schema_name=schema_name,
                 schema=schema,
-            ),
+            )
+
+        return self._execute(
+            request,
             schema,
             validator,
         )
@@ -730,7 +744,9 @@ class Phase1LLMHero(TreatmentStateMixin, LLMPlayer):
                 "instructions": (
                     "Choose one legal action in the reproducible poker simulator and return a "
                     "calibrated structured opponent-state estimate. Use only unmasked fields. "
-                    "Return concise audit fields and never provide hidden chain-of-thought."
+                    "Return concise audit fields and never provide hidden chain-of-thought. "
+                    "The six type probabilities and the three action probabilities must each "
+                    "sum exactly to 1.0."
                 ),
                 "state": state,
                 "schema_name": "phase1_closed_loop_decision",
@@ -748,6 +764,10 @@ class Phase1LLMHero(TreatmentStateMixin, LLMPlayer):
             if error:
                 self.illegal_action_count += 1
                 self.invalid_actions += 1
+        except ProviderBudgetExceeded:
+            # A formal paired block must be discarded rather than silently
+            # completing its remaining decisions with a rule-policy fallback.
+            raise
         except Exception as exc:  # noqa: BLE001 - failure is retained in the evidence trace.
             self.provider_failures += 1
             error = f"{type(exc).__name__}: {exc}"

@@ -428,6 +428,10 @@ class LLMConfirmationRunConfig:
     horizon: int = 20
     formation_hands: int = 5
     equity_samples: int = 8
+    max_calls_per_model: int = 10_000
+    offline_call_budget: int = 1_600
+    preflight_retry_reserve: int = 400
+    heads_up_contrast_calls: int = 8_000
     minimum_primary_calls_to_start_block: int = 20
     # Frozen all-or-nothing allowance for one seed across the three treatment
     # branches. A block exceeding this allowance fails closed.
@@ -692,7 +696,28 @@ def _ensure_model_preflight(
 
 
 def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataFrame:
-    confirmation_plan = build_llm_confirmation_plan(config.selected_depth)
+    confirmation_plan = build_llm_confirmation_plan(
+        config.selected_depth,
+        max_calls_per_model=config.max_calls_per_model,
+        offline_call_budget=config.offline_call_budget,
+        preflight_retry_reserve=config.preflight_retry_reserve,
+        heads_up_contrast_calls=config.heads_up_contrast_calls,
+    )
+    for job in confirmation_plan.jobs:
+        block_primary_upper_bound = _block_primary_call_upper_bound(config, job)
+        if config.max_primary_calls_per_paired_block < block_primary_upper_bound:
+            raise ValueError(
+                "max_primary_calls_per_paired_block cannot complete every legal paired block: "
+                f"cap={config.max_primary_calls_per_paired_block}, "
+                f"required_upper_bound={block_primary_upper_bound}, job={job.name}"
+            )
+        required_job_primary_calls = block_primary_upper_bound * len(config.seeds)
+        if job.call_budget < required_job_primary_calls:
+            raise ValueError(
+                "closed-loop job budget cannot cover every frozen paired seed: "
+                f"job_budget={job.call_budget}, required_upper_bound="
+                f"{required_job_primary_calls}, job={job.name}"
+            )
     source_provenance = _write_source_snapshot(
         config.output_dir, _code_provenance(config.allow_dirty_worktree)
     )

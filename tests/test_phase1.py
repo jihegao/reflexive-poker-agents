@@ -9,7 +9,7 @@ import pytest
 
 from reflexive_poker.environment import EnvironmentConfig, HoldemEnvironment
 from reflexive_poker.llm_player import ProviderResponse
-from reflexive_poker.models import ActionType
+from reflexive_poker.models import ActionType, DecisionContext, Street
 from reflexive_poker.phase1_experiment import (
     Phase1ExperimentConfig,
     _make_environment,
@@ -24,12 +24,14 @@ from reflexive_poker.phase1_models import (
     BudgetedRetryProvider,
     ExperimentalOpponent,
     OpponentBeliefState,
+    Phase1LLMHero,
     Phase1RuleHero,
     ProviderBudget,
     ProviderBudgetExceeded,
     ProviderLedger,
     ReasoningTreatment,
     Stability,
+    validate_phase1_decision,
 )
 from reflexive_poker.phase1_protocol import validate_closed_loop_completion
 from reflexive_poker.phase1_resumable import (
@@ -155,6 +157,57 @@ class _FlakyProvider:
         raise AssertionError("reflection must not be called")
 
 
+class _ProbabilityRepairProvider:
+    name = "repair-fake"
+    model = "repair-fake-model"
+
+    def __init__(self) -> None:
+        self.instructions: list[str] = []
+
+    def structured(self, *, instructions, state, schema_name, schema):
+        del state, schema_name, schema
+        self.instructions.append(instructions)
+        invalid = len(self.instructions) == 1
+        payload = {
+            "action": "check_call",
+            "raise_scale": 0.5,
+            "confidence": 0.7,
+            "situation_summary": "test",
+            "rationale": "test",
+            "self_model": "test",
+            "opponent_model": "test",
+            "risk_flags": [],
+            "next_step": "test",
+            "opponent_state": {
+                "type_probabilities": {
+                    "rock": 0.2 if invalid else 1 / 6,
+                    "tag": 0.2 if invalid else 1 / 6,
+                    "lag": 0.2 if invalid else 1 / 6,
+                    "calling_station": 0.2 if invalid else 1 / 6,
+                    "myopic": 0.2 if invalid else 1 / 6,
+                    "adaptive": 0.2 if invalid else 1 / 6,
+                },
+                "action_probabilities": {
+                    "fold": 1 / 3,
+                    "check_call": 1 / 3,
+                    "raise": 1 / 3,
+                },
+                "hero_image_aggression": 0.5,
+                "adaptation_probability": 0.5,
+                "switch_detected": False,
+            },
+        }
+        return ProviderResponse(
+            payload=payload,
+            provider=self.name,
+            model=self.model,
+            latency_ms=1.0,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+        )
+
+
 def test_budgeted_provider_counts_repair_and_fails_closed() -> None:
     ledger = ProviderLedger()
     provider = BudgetedRetryProvider(
@@ -168,6 +221,60 @@ def test_budgeted_provider_counts_repair_and_fails_closed() -> None:
     assert ledger.unresolved_failures == 0
     with pytest.raises(ProviderBudgetExceeded):
         provider.decide({})
+
+
+def test_structured_retry_includes_probability_repair_constraint() -> None:
+    raw_provider = _ProbabilityRepairProvider()
+    ledger = ProviderLedger()
+    provider = BudgetedRetryProvider(
+        raw_provider, ProviderBudget(max_calls=2, max_retries=1), ledger
+    )
+    response = provider.structured(
+        instructions="return probabilities",
+        state={},
+        schema_name="phase1_closed_loop_decision",
+        schema={},
+        validator=validate_phase1_decision,
+    )
+    assert response.payload["opponent_state"]["type_probabilities"]["rock"] == pytest.approx(1 / 6)
+    assert ledger.calls == 2
+    assert ledger.retries == 1
+    assert ledger.raw_failures == 1
+    assert ledger.unresolved_failures == 0
+    assert "REPAIR REQUIRED" in raw_provider.instructions[1]
+    assert "type_probabilities" in raw_provider.instructions[1]
+
+
+def test_phase1_llm_hero_propagates_exhausted_provider_budget() -> None:
+    hero = Phase1LLMHero(
+        "hero",
+        1,
+        BudgetedRetryProvider(
+            _FlakyProvider(), ProviderBudget(max_calls=1), ProviderLedger(calls=1)
+        ),
+        ReasoningTreatment.STATE_ONLY,
+        ("villain",),
+    )
+    context = DecisionContext(
+        hand_index=0,
+        street=Street.PREFLOP,
+        player_name="hero",
+        hole_cards=(1, 2),
+        board=(),
+        pot=1.0,
+        to_call=0.0,
+        stack=99.0,
+        current_bet=1.0,
+        legal_actions=(ActionType.CHECK_CALL, ActionType.RAISE),
+        active_players=2,
+        opponents=("villain",),
+        last_raiser=None,
+        raises_this_street=0,
+        button_distance=0,
+        environment_regime="fixed",
+    )
+    with pytest.raises(ProviderBudgetExceeded):
+        hero.act(context)
 
 
 def test_provider_ledger_is_checkpointed_before_and_after_calls(tmp_path: Path) -> None:
@@ -461,12 +568,13 @@ def test_mock_llm_confirmation_resumes_without_repeating_attempts(tmp_path: Path
         formation_hands=1,
         equity_samples=1,
         minimum_primary_calls_to_start_block=1,
+        max_primary_calls_per_paired_block=120,
         max_blocks=1,
         allow_dirty_worktree=True,
     )
     first = run_llm_confirmation_resumable(config)
     assert first["attempted_blocks"].sum() == 1
-    assert set(first["block_primary_call_cap"].dropna()) == {100}
+    assert set(first["block_primary_call_cap"].dropna()) == {120}
     assert json.loads(
         (tmp_path / "models" / "mock__mock" / "preflight" / "ATTEMPT.json").read_text()
     )["valid"]
@@ -501,6 +609,7 @@ def test_llm_confirmation_recovers_running_directory_and_counts_usage(tmp_path: 
         formation_hands=1,
         equity_samples=1,
         minimum_primary_calls_to_start_block=1,
+        max_primary_calls_per_paired_block=120,
         max_blocks=0,
         allow_dirty_worktree=True,
     )
@@ -521,3 +630,34 @@ def test_llm_confirmation_recovers_running_directory_and_counts_usage(tmp_path: 
     assert usage["calls"] == 3
     assert usage["retries"] == 1
     assert result.loc[result["job"] == job, "attempted_blocks"].iloc[0] == 1
+
+
+def test_llm_confirmation_rejects_insufficient_block_budget_before_preflight(tmp_path: Path) -> None:
+    config = LLMConfirmationRunConfig(
+        output_dir=tmp_path,
+        models=(("mock", "mock"),),
+        seeds=(9700,),
+        horizon=20,
+        formation_hands=5,
+        max_primary_calls_per_paired_block=100,
+        allow_dirty_worktree=True,
+    )
+    with pytest.raises(ValueError, match="required_upper_bound=600"):
+        run_llm_confirmation_resumable(config)
+    assert not (tmp_path / "models").exists()
+
+
+def test_llm_confirmation_rejects_job_budget_below_frozen_seed_coverage(tmp_path: Path) -> None:
+    config = LLMConfirmationRunConfig(
+        output_dir=tmp_path,
+        models=(("mock", "mock"),),
+        seeds=tuple(range(9700, 9707)),
+        horizon=20,
+        formation_hands=5,
+        max_primary_calls_per_paired_block=600,
+        max_blocks=0,
+        allow_dirty_worktree=True,
+    )
+    with pytest.raises(ValueError, match="job_budget=4000, required_upper_bound=4200"):
+        run_llm_confirmation_resumable(config)
+    assert not (tmp_path / "models").exists()

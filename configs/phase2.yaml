@@ -1,0 +1,129 @@
+# Phase 2 preregistration manifest. expctl can execute its bounded four-system
+# provider preflight, but no Phase 2 outcome experiment is runnable from this file.
+protocol: prbench-cross-model-v1
+phase: phase2
+frozen_on: "2026-08-02"
+evidence_layers:
+  simulation:
+    heads_up:
+      treatments: [state_only, action_prediction, d1_budget_matched, recursive_d2, recursive_d3]
+      opponent_types: [rock, tag, lag, calling_station, myopic]
+      regimes: [fixed, noisy, midpoint_shift, continuous_adaptation]
+      paired_execution:
+        shared_deck_and_board: true
+        shared_opponent_rng: true
+        shared_formation_checkpoint: true
+        seat_mirroring: true
+    six_max:
+      purpose: external_validity
+      treatments: [state_only, action_prediction, d1_budget_matched, recursive_d2, recursive_d3]
+      composition: heterogeneous_classic
+      lineup: [llm, tag, lag, rock, calling_station, myopic]
+      seat_mirroring: true
+      button_rotation: required
+      shared_deck_and_board: true
+      shared_opponent_rng: true
+      shared_formation_checkpoint: true
+      longer_horizon_than_phase1: required
+      larger_paired_seed_count_than_phase1: required
+      return_power_analysis: required_before_formal_run
+  llm_confirmation:
+    models:
+      - serving_system: opencode-go/deepseek-v4-flash
+        provider: opencode-go
+        model: deepseek-v4-flash
+      - serving_system: opencode-go/qwen3.7-max
+        provider: opencode-go
+        model: qwen3.7-max
+      - serving_system: opencode-go/glm-5.2
+        provider: opencode-go
+        model: glm-5.2
+      - serving_system: codex/gpt-5.6-luna
+        provider: codex
+        model: gpt-5.6-luna
+paper_phase2:
+  # This remains bounded preparation, not a Phase 2 outcome sample.
+  preflight_cases: 4
+  serving_systems:
+    - serving_system: opencode-go/deepseek-v4-flash
+      provider: opencode-go
+      model: deepseek-v4-flash
+    - serving_system: opencode-go/qwen3.7-max
+      provider: opencode-go
+      model: qwen3.7-max
+    - serving_system: opencode-go/glm-5.2
+      provider: opencode-go
+      model: glm-5.2
+    - serving_system: codex/gpt-5.6-luna
+      provider: codex
+      model: gpt-5.6-luna
+  # Filled only after the four-system preflight. The returned provider identity
+  # is copied from the raw gate, then manually frozen before outcome calls.
+  identity_locks:
+    - serving_system: opencode-go/deepseek-v4-flash
+      status: pending_provider_preflight
+      returned_model_id: null
+      returned_version_id: null
+    - serving_system: opencode-go/qwen3.7-max
+      status: pending_provider_preflight
+      returned_model_id: null
+      returned_version_id: null
+    - serving_system: opencode-go/glm-5.2
+      status: pending_provider_preflight
+      returned_model_id: null
+      returned_version_id: null
+    - serving_system: codex/gpt-5.6-luna
+      status: pending_provider_preflight
+      returned_model_id: null
+      returned_version_id: null
+  offline_understanding:
+    treatments: [state_only, action_prediction, d1_budget_matched, recursive_d2, recursive_d3]
+    report: [U_table, U_opponent, cost, latency, return, pareto_frontier]
+  closed_loop:
+    core_treatments: [state_only, d1_budget_matched, recursive_d2]
+    d3_extension:
+      treatment: recursive_d3
+      compare_against: recursive_d2
+      preregister_before_outcomes: true
+    paired_execution:
+      shared_formation_checkpoint: true
+      shared_deck_and_board: true
+      shared_opponent_rng: true
+      seat_mirroring: true
+  external_validity:
+    arena: six_max
+    composition: heterogeneous_classic
+    lineup: [llm, tag, lag, rock, calling_station, myopic]
+    treatments: [state_only, action_prediction, d1_budget_matched, recursive_d2, recursive_d3]
+    button_rotation: required
+    shared_formation_checkpoint: true
+    shared_deck_and_board: true
+    shared_opponent_rng: true
+    seat_mirroring: true
+    longer_horizon_than_phase1: required
+    larger_paired_seed_count_than_phase1: required
+    return_power_analysis: required_before_formal_run
+  execution_status: prepared_not_runnable
+  outcome_design:
+    status: pending_phase1_lock
+    heads_up_hands: null
+    paired_seed_count: null
+  formal_run_prerequisites:
+    - freeze_qwen_and_glm_returned_version_ids
+    - complete_four_system_provider_preflight
+    - freeze_pricing_manifest
+    - freeze_horizon_and_paired_seed_count_before_outcomes
+provider_gate:
+  max_schema_retries_per_decision: 1
+  require_zero_unresolved_failures: true
+  require_zero_fallbacks: true
+  require_exact_model_identity: true
+  require_complete_token_accounting: true
+resumable_execution:
+  simulation_checkpoint: per_cell_and_seed
+  llm_checkpoint: per_model_job_and_paired_seed_block
+  provider_ledger_checkpoint: before_and_after_every_call
+  incomplete_directory_suffix: .running
+  interrupted_artifacts: retained_and_budget_accounted
+  immutable_plan_hash: true
+  atomic_completion_marker: COMPLETED.json

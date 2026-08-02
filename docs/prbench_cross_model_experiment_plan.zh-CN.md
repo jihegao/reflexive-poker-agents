@@ -310,6 +310,12 @@ Phase 2 才加入：
 - 更长 horizon、更大 paired seed 数和收益功效分析；
 - 需要时追加 D3 正式闭环，而不是根据 Phase 1 正文结果临时挑选。
 
+冻结的准备清单见 [`configs/phase2.yaml`](../configs/phase2.yaml)：它登记四个
+serving systems、全部五个理解处理条件，以及异质 Six-max 外部有效性不变量。
+`expctl paper-phase2-preflight` 只执行这四个系统的四案例、全处理条件 provider
+gate；它不运行任何 Phase 2 outcome，因此不能把这次预检误作完整横评或已接入的
+Six-max 证据。
+
 ### Agent-friendly CLI 与前端隔离
 
 研究实验不进入前端请求链路。`expctl` 只提交独立后台 worker，并将状态、事件、检查点和结果写入独立 registry：
@@ -318,6 +324,13 @@ Phase 2 才加入：
 expctl doctor --output json
 expctl experiment list --output json
 expctl config validate configs/phase1.yaml --output json
+
+expctl run start \
+  --config configs/phase2.yaml \
+  --experiment paper-phase2-preflight \
+  --request-id phase2-provider-preflight-v1 \
+  --tag phase2-provider-preflight \
+  --output json
 
 expctl run start \
   --config configs/phase1.yaml \

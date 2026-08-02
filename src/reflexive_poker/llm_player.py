@@ -80,6 +80,21 @@ class ProviderResponse:
     total_tokens: int | None = None
     cost_usd: float | None = None
     response_id: str | None = None
+    # ``input_tokens`` remains the backwards-compatible aggregate: ordinary
+    # input plus cache reads/writes.  The split fields make cache behaviour
+    # auditable without changing existing budget or analysis consumers.
+    reasoning_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    actual_model: str | None = None
+    model_version: str | None = None
+    observed_billed_cost: float | None = None
+    estimated_api_equivalent_cost: float | None = None
+    cost_observability: str = "unavailable"
+    # The source of the model identifier matters: a provider session export is
+    # stronger evidence than a successful CLI selector, and both are reported.
+    model_identity_source: str = "unavailable"
+    serving_stack_version: str | None = None
 
 
 class LLMProvider(Protocol):
@@ -238,7 +253,47 @@ class OpenCodeGoProvider:
     ) -> None:
         self.model = model
         self.command = command
+        self._export_sessions = run is None
         self.run = run or self._run
+
+    def _export_session_model(self, session_id: str) -> str | None:
+        """Read the CLI's persisted session metadata as model attestation.
+
+        OpenCode's stream does not currently include model fields for every Go
+        provider, while its locally persisted session record does.  This is a
+        read-only export of the exact response session, not an inference from
+        the requested model string.
+        """
+        try:
+            completed = subprocess.run(
+                [self.command, "export", session_id, "--sanitize"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if completed.returncode != 0:
+                return None
+            # OpenCode 1.18 prefixes a human progress line before the JSON
+            # export, so strict ``json.loads(stdout)`` discards a perfectly
+            # valid session attestation. Reuse the stream parser that locates
+            # the first JSON object without trusting the requested model.
+            payload = self._json_output(completed.stdout)
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        # ``opencode export`` uses ``info`` for the session envelope in 1.18,
+        # while older exports used ``session``.
+        session = payload.get("session", payload.get("info", payload))
+        if not isinstance(session, dict):
+            return None
+        model = session.get("model")
+        if not isinstance(model, dict):
+            return None
+        provider_id = model.get("providerID")
+        model_id = model.get("id") or model.get("modelID")
+        return str(model_id) if provider_id == "opencode-go" and isinstance(model_id, str) else None
 
     def _run(self, prompt: str) -> str:
         with tempfile.TemporaryDirectory(prefix="reflexive-poker-opencode-") as directory:
@@ -285,14 +340,71 @@ class OpenCodeGoProvider:
                 return payload
         raise ValueError("OpenCode Go response did not contain a JSON object.")
 
+    @staticmethod
+    def _event_model_provenance(event: dict[str, Any]) -> tuple[str | None, str | None]:
+        """Read model identity only when the CLI event explicitly supplies it.
+
+        OpenCode has used both camelCase and snake_case event fields across
+        releases/providers.  We deliberately do not infer a version from the
+        configured model string: absence means the provider did not attest it.
+        """
+
+        actual_model: str | None = None
+        model_version: str | None = None
+        scopes = [event]
+        for name in ("part", "message", "info", "metadata", "result"):
+            value = event.get(name)
+            if isinstance(value, dict):
+                scopes.append(value)
+        for scope in scopes:
+            if actual_model is None:
+                for name in ("actual_model", "actualModel", "model_id", "modelId", "modelID"):
+                    value = scope.get(name)
+                    if isinstance(value, str) and value:
+                        actual_model = value
+                        break
+                if actual_model is None:
+                    value = scope.get("model")
+                    if isinstance(value, str) and value:
+                        actual_model = value
+                    elif isinstance(value, dict):
+                        for name in ("id", "model_id", "modelId", "name"):
+                            nested = value.get(name)
+                            if isinstance(nested, str) and nested:
+                                actual_model = nested
+                                break
+            if model_version is None:
+                for name in ("model_version", "modelVersion", "model_version_id", "modelVersionId"):
+                    value = scope.get(name)
+                    if isinstance(value, str) and value:
+                        model_version = value
+                        break
+                model = scope.get("model")
+                if model_version is None and isinstance(model, dict):
+                    for name in ("version", "model_version", "modelVersion"):
+                        value = model.get(name)
+                        if isinstance(value, str) and value:
+                            model_version = value
+                            break
+        return actual_model, model_version
+
     @classmethod
     def _result(
         cls, output: str
-    ) -> tuple[dict[str, Any], dict[str, int | None], float | None, str | None]:
+    ) -> tuple[dict[str, Any], dict[str, int | None], float | None, str | None, str | None, str | None]:
         final_text: str | None = None
         response_id: str | None = None
         cost_usd: float | None = None
-        usage: dict[str, int | None] = {"input": None, "output": None, "total": None}
+        actual_model: str | None = None
+        model_version: str | None = None
+        usage: dict[str, int | None] = {
+            "input": None,
+            "output": None,
+            "total": None,
+            "reasoning": None,
+            "cache_read": None,
+            "cache_write": None,
+        }
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -301,6 +413,9 @@ class OpenCodeGoProvider:
             if not isinstance(event, dict):
                 continue
             response_id = event.get("sessionID") or response_id
+            event_model, event_version = cls._event_model_provenance(event)
+            actual_model = event_model or actual_model
+            model_version = event_version or model_version
             if event.get("type") == "text":
                 part = event.get("part", {})
                 if isinstance(part.get("text"), str):
@@ -308,18 +423,45 @@ class OpenCodeGoProvider:
             if event.get("type") == "step_finish":
                 part = event.get("part", {})
                 tokens = part.get("tokens", {})
+                # OpenCode Go reports cache reads/writes separately for some
+                # providers.  They are input-side tokens, so omitting them
+                # makes a D1-BM versus D2 budget comparison look comparable
+                # when it is not.
+                cache = tokens.get("cache", {}) if isinstance(tokens, dict) else {}
+                if not isinstance(cache, dict):
+                    cache = {}
+                def token_value(*names: str, values: dict[str, Any] = tokens, cache_values: dict[str, Any] = cache) -> int:
+                    for name in names:
+                        value = values.get(name, cache_values.get(name))
+                        if isinstance(value, int):
+                            return value
+                    return 0
+                input_tokens = token_value("input")
+                cache_read = token_value("cache_read", "cacheRead", "read")
+                cache_write = token_value("cache_write", "cacheWrite", "write")
+                output_tokens = token_value("output")
+                reasoning_tokens = token_value("reasoning", "reasoning_tokens", "reasoningTokens")
+                reported_total = tokens.get("total")
+                total_tokens = (
+                    int(reported_total)
+                    if isinstance(reported_total, int)
+                    else input_tokens + cache_read + cache_write + output_tokens
+                )
                 usage = {
-                    "input": tokens.get("input"),
-                    "output": tokens.get("output"),
-                    "total": tokens.get("total"),
+                    "input": input_tokens + cache_read + cache_write,
+                    "output": output_tokens,
+                    "total": total_tokens,
+                    "reasoning": reasoning_tokens,
+                    "cache_read": cache_read,
+                    "cache_write": cache_write,
                 }
                 reported_cost = part.get("cost")
                 if isinstance(reported_cost, int | float):
                     cost_usd = float(reported_cost)
         if final_text is None:
-            return cls._json_output(output), usage, cost_usd, response_id
+            return cls._json_output(output), usage, cost_usd, response_id, actual_model, model_version
         payload = cls._json_output(final_text)
-        return payload, usage, cost_usd, response_id
+        return payload, usage, cost_usd, response_id, actual_model, model_version
 
     def _call(
         self,
@@ -341,7 +483,12 @@ class OpenCodeGoProvider:
         started = time.perf_counter()
         output = self.run(prompt)
         latency_ms = 1000.0 * (time.perf_counter() - started)
-        payload, usage, cost_usd, response_id = self._result(output)
+        payload, usage, cost_usd, response_id, actual_model, model_version = self._result(output)
+        model_identity_source = "provider_stream" if actual_model is not None else "unavailable"
+        if actual_model is None and response_id is not None and self._export_sessions:
+            actual_model = self._export_session_model(response_id)
+            if actual_model is not None:
+                model_identity_source = "opencode_session_export"
         return ProviderResponse(
             payload=payload,
             provider=self.name,
@@ -352,6 +499,14 @@ class OpenCodeGoProvider:
             total_tokens=usage["total"],
             cost_usd=cost_usd,
             response_id=response_id,
+            reasoning_tokens=usage["reasoning"],
+            cache_read_tokens=usage["cache_read"],
+            cache_write_tokens=usage["cache_write"],
+            actual_model=actual_model,
+            model_version=model_version,
+            observed_billed_cost=cost_usd,
+            cost_observability="exact" if cost_usd is not None else "unavailable",
+            model_identity_source=model_identity_source,
         )
 
     def decide(self, state: dict[str, Any]) -> ProviderResponse:
@@ -409,7 +564,24 @@ class CodexProvider:
     ) -> None:
         self.model = model
         self.command = command
+        self._local_cli = run is None
+        self._cli_version: str | None = None
         self.run = run or self._run
+
+    def _serving_stack_version(self) -> str | None:
+        if self._cli_version is not None:
+            return self._cli_version
+        if not self._local_cli:
+            return None
+        try:
+            completed = subprocess.run(
+                [self.command, "--version"], check=False, capture_output=True, text=True, timeout=15
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode == 0 and completed.stdout.strip():
+            self._cli_version = completed.stdout.strip()
+        return self._cli_version
 
     def _run(self, prompt: str, schema: dict[str, Any]) -> str:
         with tempfile.TemporaryDirectory(prefix="reflexive-poker-codex-") as directory:
@@ -452,18 +624,28 @@ class CodexProvider:
         return completed.stdout
 
     @staticmethod
-    def _result(output: str) -> tuple[dict[str, Any], dict[str, int | None]]:
+    def _result(
+        output: str,
+    ) -> tuple[dict[str, Any], dict[str, int | None], str | None, str | None, str | None]:
         final_message: str | None = None
+        actual_model: str | None = None
+        model_version: str | None = None
+        response_id: str | None = None
         usage: dict[str, int | None] = {"input": None, "output": None, "total": None}
         for line in output.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+                response_id = event["thread_id"]
             if event.get("type") == "item.completed":
                 item = event.get("item", {})
                 if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                     final_message = item["text"]
+            event_model, event_version = OpenCodeGoProvider._event_model_provenance(event)
+            actual_model = event_model or actual_model
+            model_version = event_version or model_version
             if event.get("type") == "turn.completed":
                 reported = event.get("usage", {})
                 input_tokens = reported.get("input_tokens")
@@ -479,7 +661,7 @@ class CodexProvider:
                 }
         if final_message is None:
             raise ValueError("Codex response did not include a final agent message.")
-        return json.loads(final_message), usage
+        return json.loads(final_message), usage, actual_model, model_version, response_id
 
     def _call(
         self,
@@ -498,7 +680,16 @@ class CodexProvider:
         started = time.perf_counter()
         output = self.run(prompt, schema)
         latency_ms = 1000.0 * (time.perf_counter() - started)
-        payload, usage = self._result(output)
+        payload, usage, actual_model, model_version, response_id = self._result(output)
+        identity_source = "provider_stream" if actual_model is not None else "unavailable"
+        if actual_model is None and self.model != "current" and self._local_cli:
+            # Codex CLI 0.146's JSON events contain no model field. A successful
+            # local execution with an explicit selector still proves which
+            # serving-stack model selector was accepted; retain that weaker,
+            # explicitly labelled evidence rather than calling it a response
+            # field from the provider.
+            actual_model = self.model
+            identity_source = "cli_selected_model"
         return ProviderResponse(
             payload=payload,
             provider=self.name,
@@ -507,6 +698,14 @@ class CodexProvider:
             input_tokens=usage["input"],
             output_tokens=usage["output"],
             total_tokens=usage["total"],
+            response_id=response_id,
+            actual_model=actual_model,
+            model_version=model_version,
+            # Codex CLI's JSON stream currently exposes token usage but no
+            # per-call billing.  A missing bill is not a zero-dollar bill.
+            cost_observability="unavailable",
+            model_identity_source=identity_source,
+            serving_stack_version=self._serving_stack_version(),
         )
 
     def decide(self, state: dict[str, Any]) -> ProviderResponse:
@@ -978,6 +1177,20 @@ class LLMPlayer(PokerAgent):
             "output_tokens": provider_response.output_tokens if provider_response else None,
             "total_tokens": provider_response.total_tokens if provider_response else None,
             "cost_usd": provider_response.cost_usd if provider_response else None,
+            "reasoning_tokens": provider_response.reasoning_tokens if provider_response else None,
+            "cache_read_tokens": provider_response.cache_read_tokens if provider_response else None,
+            "cache_write_tokens": provider_response.cache_write_tokens if provider_response else None,
+            "actual_model": provider_response.actual_model if provider_response else None,
+            "model_version": provider_response.model_version if provider_response else None,
+            "observed_billed_cost": (
+                provider_response.observed_billed_cost if provider_response else None
+            ),
+            "estimated_api_equivalent_cost": (
+                provider_response.estimated_api_equivalent_cost if provider_response else None
+            ),
+            "cost_observability": (
+                provider_response.cost_observability if provider_response else "unavailable"
+            ),
             "response_id": provider_response.response_id if provider_response else None,
         }
         trace["final_action"] = decision.action.value
@@ -1053,6 +1266,16 @@ class LLMPlayer(PokerAgent):
             "output_tokens": response.output_tokens if response else None,
             "total_tokens": response.total_tokens if response else None,
             "cost_usd": response.cost_usd if response else None,
+            "reasoning_tokens": response.reasoning_tokens if response else None,
+            "cache_read_tokens": response.cache_read_tokens if response else None,
+            "cache_write_tokens": response.cache_write_tokens if response else None,
+            "actual_model": response.actual_model if response else None,
+            "model_version": response.model_version if response else None,
+            "observed_billed_cost": response.observed_billed_cost if response else None,
+            "estimated_api_equivalent_cost": (
+                response.estimated_api_equivalent_cost if response else None
+            ),
+            "cost_observability": response.cost_observability if response else "unavailable",
             "response_id": response.response_id if response else None,
             "error": error,
         }

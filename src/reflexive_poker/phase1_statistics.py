@@ -175,18 +175,25 @@ def rolling_direction_consistency(per_hand_deltas: pd.DataFrame, window: int = 2
 def inference_table(
     paired: pd.DataFrame,
     *,
+    metric: str = "chips_per_100_delta",
     bootstrap_samples: int = 5_000,
     permutation_samples: int = 20_000,
 ) -> pd.DataFrame:
+    """Calculate seed-paired inference for one declared outcome metric."""
+    if metric not in paired.columns:
+        raise ValueError(f"paired frame does not contain metric: {metric}")
     rows: list[dict[str, float | int | str]] = []
     for contrast, group in paired.groupby("contrast", sort=False):
-        values = group["chips_per_100_delta"].to_numpy(dtype=float)
+        values = group[metric].dropna().to_numpy(dtype=float)
+        if len(values) == 0:
+            continue
         low, high = paired_bootstrap_interval(values, samples=bootstrap_samples)
         ordered = np.sort(values)
         worst_count = max(1, math.ceil(len(values) * 0.25))
         leave_largest = np.delete(values, np.argmax(np.abs(values))) if len(values) > 1 else values
         rows.append(
             {
+                "metric": metric,
                 "contrast": contrast,
                 "pairs": len(values),
                 "mean_delta": float(values.mean()),
@@ -203,8 +210,11 @@ def inference_table(
         )
     frame = pd.DataFrame(rows)
     if frame.empty:
-        frame["holm_p"] = []
-        return frame
+        return pd.DataFrame(columns=[
+            "metric", "contrast", "pairs", "mean_delta", "median_delta",
+            "ci95_low", "ci95_high", "permutation_p", "positive_seed_rate",
+            "worst_quartile_mean", "leave_largest_out_mean", "holm_p",
+        ])
     frame["holm_p"] = holm_adjust(frame["permutation_p"].tolist())
     return frame
 

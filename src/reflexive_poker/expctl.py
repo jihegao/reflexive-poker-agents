@@ -23,9 +23,11 @@ from .phase1_offline import OfflineBenchmarkConfig, run_offline_benchmark
 from .phase1_resumable import (
     FullSimulationRunConfig,
     LLMConfirmationRunConfig,
+    freeze_phase1_source_snapshot,
     run_full_simulation_matrix,
     run_llm_confirmation_resumable,
 )
+from .phase2_readiness import audit_phase2_readiness
 
 SCHEMA_VERSION = 1
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
@@ -36,6 +38,7 @@ EXPERIMENTS = {
     "simulation": "Run or resume the isolated rule-agent Phase 1 matrix.",
     "llm-confirmation": "Run or resume the paired two-model Heads-up confirmation.",
     "paper-phase1": "Run preflight, offline evidence, and paired closed-loop confirmation.",
+    "paper-phase2-preflight": "Run the bounded four-system Phase 2 provider preflight only.",
 }
 
 
@@ -111,6 +114,33 @@ def _load_config(path: Path) -> dict[str, Any]:
                 "paper_phase1.models must contain at least two serving systems",
                 details={"field": "paper_phase1.models"},
             )
+    phase2 = payload.get("paper_phase2")
+    if phase2 is not None:
+        if not isinstance(phase2, dict):
+            raise ExpctlError("CONFIG_INVALID", "paper_phase2 must be a mapping")
+        systems = phase2.get("serving_systems", [])
+        if not isinstance(systems, list) or len(systems) != 4:
+            raise ExpctlError(
+                "CONFIG_INVALID",
+                "paper_phase2.serving_systems must contain exactly four serving systems",
+                details={"field": "paper_phase2.serving_systems"},
+            )
+        identities: set[tuple[str, str]] = set()
+        for system in systems:
+            if not isinstance(system, dict) or not system.get("provider") or not system.get("model"):
+                raise ExpctlError(
+                    "CONFIG_INVALID",
+                    "Each paper_phase2 serving system needs provider and model fields",
+                    details={"field": "paper_phase2.serving_systems"},
+                )
+            identity = (str(system["provider"]), str(system["model"]))
+            if identity in identities:
+                raise ExpctlError(
+                    "CONFIG_INVALID",
+                    "paper_phase2.serving_systems must not contain duplicate provider/model pairs",
+                    details={"field": "paper_phase2.serving_systems"},
+                )
+            identities.add(identity)
     return payload
 
 
@@ -234,6 +264,30 @@ def _models(config: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     return tuple(parsed)
 
 
+def _phase2_preflight_models(config: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Return the frozen Phase 2 systems without falling back to Phase 1 fields."""
+    phase = config.get("paper_phase2")
+    if not isinstance(phase, dict):
+        raise ExpctlError("CONFIG_INVALID", "paper-phase2-preflight requires paper_phase2")
+    systems = phase.get("serving_systems", [])
+    if not isinstance(systems, list) or len(systems) != 4:
+        raise ExpctlError(
+            "CONFIG_INVALID",
+            "paper-phase2-preflight requires exactly four paper_phase2 serving systems",
+            details={"field": "paper_phase2.serving_systems"},
+        )
+    parsed: list[tuple[str, str]] = []
+    for system in systems:
+        if not isinstance(system, dict) or not system.get("provider") or not system.get("model"):
+            raise ExpctlError(
+                "CONFIG_INVALID",
+                "Each paper_phase2 serving system needs provider and model fields",
+                details={"field": "paper_phase2.serving_systems"},
+            )
+        parsed.append((str(system["provider"]), str(system["model"])))
+    return tuple(parsed)
+
+
 def _offline_config(
     config: dict[str, Any],
     output_dir: Path,
@@ -260,7 +314,14 @@ def _offline_config(
     )
 
 
-def _run_offline_models(config: dict[str, Any], artifact_dir: Path, case_count: int) -> None:
+def _run_offline_models(
+    config: dict[str, Any],
+    artifact_dir: Path,
+    case_count: int,
+    *,
+    models: tuple[tuple[str, str], ...] | None = None,
+) -> None:
+    active_models = _models(config) if models is None else models
     run_offline_benchmark(
         _offline_config(
             config,
@@ -271,7 +332,7 @@ def _run_offline_models(config: dict[str, Any], artifact_dir: Path, case_count: 
             preregistered=True,
         )
     )
-    for provider, model in _models(config):
+    for provider, model in active_models:
         slug = f"{provider}__{model}".replace("/", "_").replace(".", "_")
         result = run_offline_benchmark(
             _offline_config(
@@ -298,6 +359,16 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
     artifacts.mkdir(parents=True, exist_ok=True)
     phase = _paper_config(config)
     if experiment == "offline-baselines":
+        source_provenance = freeze_phase1_source_snapshot(
+            artifacts,
+            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
+        )
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
         run_offline_benchmark(
             _offline_config(
                 config,
@@ -316,7 +387,17 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                 "MODEL_REQUIRED",
                 "offline-model requires --provider and --model",
             )
-        run_offline_benchmark(
+        source_provenance = freeze_phase1_source_snapshot(
+            artifacts,
+            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
+        )
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
+        result = run_offline_benchmark(
             _offline_config(
                 config,
                 artifacts / "offline_model",
@@ -326,12 +407,66 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                 preregistered=True,
             )
         )
+        if not result["provider_gate"]["valid"]:
+            raise ExpctlError(
+                "PROVIDER_GATE_FAILED",
+                f"Offline provider gate failed for {provider}:{model}",
+                retryable=True,
+                details={"provider_gate": result["provider_gate"]},
+            )
     elif experiment == "provider-preflight":
+        provider = metadata.get("provider")
+        model = metadata.get("model")
+        if bool(provider) != bool(model):
+            raise ExpctlError(
+                "MODEL_REQUIRED",
+                "provider-preflight requires both --provider and --model when narrowed",
+            )
+        source_provenance = freeze_phase1_source_snapshot(
+            artifacts,
+            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
+        )
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
         _run_offline_models(
             config,
             artifacts / "preflight",
             int(phase.get("preflight_cases", 4)),
+            models=((str(provider), str(model)),) if provider and model else None,
         )
+    elif experiment == "paper-phase2-preflight":
+        phase2 = config.get("paper_phase2")
+        if not isinstance(phase2, dict):
+            raise ExpctlError("CONFIG_INVALID", "paper-phase2-preflight requires paper_phase2")
+        preflight_cases = int(phase2.get("preflight_cases", 4))
+        if preflight_cases != 4:
+            raise ExpctlError(
+                "CONFIG_INVALID",
+                "paper-phase2-preflight is fixed at four cases per treatment",
+                details={"field": "paper_phase2.preflight_cases", "value": preflight_cases},
+            )
+        source_provenance = freeze_phase1_source_snapshot(
+            artifacts,
+            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
+        )
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
+        _event(run_dir, "phase_started", phase="phase2_provider_preflight")
+        _run_offline_models(
+            config,
+            artifacts / "preflight",
+            preflight_cases,
+            models=_phase2_preflight_models(config),
+        )
+        _event(run_dir, "phase_completed", phase="phase2_provider_preflight")
     elif experiment == "simulation":
         simulation = config["evidence_layers"]["simulation"]["heads_up"]
         seeds = simulation.get("seeds", {})
@@ -350,6 +485,16 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
         )
     elif experiment in {"llm-confirmation", "paper-phase1"}:
         if experiment == "paper-phase1":
+            source_provenance = freeze_phase1_source_snapshot(
+                artifacts,
+                allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
+            )
+            _event(
+                run_dir,
+                "source_frozen",
+                source_fingerprint=source_provenance["source_fingerprint"],
+                source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+            )
             _event(run_dir, "phase_started", phase="provider_preflight")
             _run_offline_models(
                 config,
@@ -366,7 +511,7 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
             _event(run_dir, "phase_completed", phase="offline_understanding")
         closed = phase.get("closed_loop", {})
         _event(run_dir, "phase_started", phase="closed_loop")
-        run_llm_confirmation_resumable(
+        closed_loop_status = run_llm_confirmation_resumable(
             LLMConfirmationRunConfig(
                 output_dir=artifacts / "llm_confirmation",
                 selected_depth=ReasoningTreatment.RECURSIVE_D2,
@@ -381,10 +526,47 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                 horizon=int(closed.get("hands", 20)),
                 formation_hands=int(closed.get("formation_hands", 5)),
                 equity_samples=int(closed.get("equity_samples", 8)),
+                max_primary_calls_per_paired_block=int(
+                    closed.get("max_primary_calls_per_paired_block", 100)
+                ),
                 max_blocks=metadata.get("max_blocks"),
                 allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
             )
         )
+        if experiment == "paper-phase1":
+            expected_blocks = int(closed.get("seed_count", 40))
+            expected_models = {f"{provider}:{model}" for provider, model in _models(config)}
+            observed_models = {
+                f"{row.provider}:{row.model}"
+                for row in closed_loop_status.itertuples(index=False)
+            }
+            incomplete = closed_loop_status.loc[
+                closed_loop_status["valid_blocks"] < expected_blocks
+            ]
+            if observed_models != expected_models or not incomplete.empty:
+                raise ExpctlError(
+                    "FORMAL_COMPLETION_INVALID",
+                    "Phase 1 closed-loop did not produce every required valid paired block",
+                    retryable=True,
+                    details={
+                        "expected_blocks_per_model_regime": expected_blocks,
+                        "observed_models": sorted(observed_models),
+                        "incomplete": incomplete.to_dict(orient="records"),
+                    },
+                )
+            paired_blocks = pd.read_csv(
+                artifacts / "llm_confirmation" / "CROSS_MODEL_PAIRED_BLOCKS.csv"
+            )
+            if len(paired_blocks) != expected_blocks or not bool(paired_blocks["valid"].all()):
+                raise ExpctlError(
+                    "FORMAL_COMPLETION_INVALID",
+                    "Phase 1 has no complete cross-model all-arm paired-block intersection",
+                    retryable=True,
+                    details={
+                        "expected_blocks": expected_blocks,
+                        "paired_blocks": paired_blocks.to_dict(orient="records"),
+                    },
+                )
         _event(run_dir, "phase_completed", phase="closed_loop")
     else:
         raise ExpctlError("EXPERIMENT_UNKNOWN", f"Unknown experiment: {experiment}")
@@ -701,6 +883,17 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("path")
     validate.add_argument("--output", choices=("human", "json"), default="human")
 
+    phase2_readiness = sub.add_parser(
+        "phase2-readiness",
+        help="Audit whether Phase 2 is frozen enough to permit outcome runs",
+    )
+    phase2_readiness.add_argument("--config", required=True)
+    phase2_readiness.add_argument("--preflight-dir", required=True)
+    phase2_readiness.add_argument("--pricing-manifest")
+    phase2_readiness.add_argument("--power-analysis")
+    phase2_readiness.add_argument("--output-dir", required=True)
+    phase2_readiness.add_argument("--output", choices=("human", "json"), default="human")
+
     run = sub.add_parser("run", help="Manage background experiment runs")
     run_sub = run.add_subparsers(dest="run_command", required=True)
     start = run_sub.add_parser("start")
@@ -770,6 +963,21 @@ def main(argv: list[str] | None = None) -> None:
                 {"ok": True, "path": str(Path(args.path).resolve()), "config_hash": _config_hash(config)},
                 args.output,
             )
+        elif args.command == "phase2-readiness":
+            config = _load_config(Path(args.config).resolve())
+            phase2 = config.get("paper_phase2")
+            if not isinstance(phase2, dict):
+                raise ExpctlError("CONFIG_INVALID", "phase2-readiness requires paper_phase2")
+            result = audit_phase2_readiness(
+                Path(args.output_dir).resolve(),
+                phase2={**phase2, "protocol": config.get("protocol")},
+                preflight_dir=Path(args.preflight_dir).resolve(),
+                pricing_manifest=(
+                    Path(args.pricing_manifest).resolve() if args.pricing_manifest else None
+                ),
+                power_analysis=Path(args.power_analysis).resolve() if args.power_analysis else None,
+            )
+            _emit(result, args.output)
         elif args.command == "run" and args.run_command == "start":
             _emit(_start(args), args.output)
         elif args.command == "run" and args.run_command == "status":

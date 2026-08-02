@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ import pandas as pd
 from .phase1_experiment import (
     ConfirmationJob,
     Phase1ExperimentConfig,
+    Phase1LLMConfirmationPlan,
     _jsonable,
     _paired,
     _paired_hand_deltas,
@@ -24,6 +26,7 @@ from .phase1_experiment import (
 )
 from .phase1_models import ProviderBudget, ReasoningTreatment
 from .phase1_offline import OfflineBenchmarkConfig, run_offline_benchmark
+from .phase1_protocol import canonical_checkpoint_id, valid_paired_block_intersection
 from .phase1_statistics import inference_table
 
 REQUIRED_BLOCK_FILES = (
@@ -34,6 +37,31 @@ REQUIRED_BLOCK_FILES = (
     "inference.csv",
     "forks.csv",
     "provider_gate.json",
+)
+
+PROTOCOL_SEMANTIC_SOURCE_FILES = (
+    "src/reflexive_poker/phase1_models.py",
+    "src/reflexive_poker/phase1_experiment.py",
+    "src/reflexive_poker/phase1_statistics.py",
+    "src/reflexive_poker/phase1_protocol.py",
+    "src/reflexive_poker/phase1_offline.py",
+    "src/reflexive_poker/phase1_offline_evidence.py",
+    "src/reflexive_poker/environment.py",
+    "src/reflexive_poker/agents.py",
+    "src/reflexive_poker/tournament_agents.py",
+    "src/reflexive_poker/llm_player.py",
+    "configs/phase1.yaml",
+)
+PROTOCOL_SEMANTICS_ID = "prbench-cross-model-v1"
+
+PROTOCOL_SOURCE_FILES = PROTOCOL_SEMANTIC_SOURCE_FILES + (
+    "src/reflexive_poker/phase1_evidence_bundle.py",
+    "src/reflexive_poker/phase2_readiness.py",
+    "src/reflexive_poker/phase1_resumable.py",
+    "src/reflexive_poker/expctl.py",
+    "scripts/run_phase1_experiment.py",
+    "scripts/run_phase1_resumable.py",
+    "configs/phase2.yaml",
 )
 
 
@@ -78,21 +106,8 @@ def _code_provenance(allow_dirty_worktree: bool) -> dict[str, Any]:
             "formal Phase 1 execution requires a clean worktree; commit the implementation "
             "or use --allow-dirty-worktree only for a bounded rehearsal"
         )
-    relative_files = (
-        "src/reflexive_poker/phase1_models.py",
-        "src/reflexive_poker/phase1_experiment.py",
-        "src/reflexive_poker/phase1_statistics.py",
-        "src/reflexive_poker/phase1_resumable.py",
-        "src/reflexive_poker/environment.py",
-        "src/reflexive_poker/agents.py",
-        "src/reflexive_poker/tournament_agents.py",
-        "src/reflexive_poker/llm_player.py",
-        "scripts/run_phase1_experiment.py",
-        "scripts/run_phase1_resumable.py",
-        "configs/phase1.yaml",
-    )
     digest = hashlib.sha256()
-    for relative in relative_files:
+    for relative in PROTOCOL_SOURCE_FILES:
         path = repository / relative
         digest.update(relative.encode())
         digest.update(path.read_bytes())
@@ -100,7 +115,57 @@ def _code_provenance(allow_dirty_worktree: bool) -> dict[str, Any]:
         "git_commit": commit,
         "worktree_dirty": dirty,
         "source_fingerprint": digest.hexdigest(),
+        "protocol_semantics_id": PROTOCOL_SEMANTICS_ID,
+        "protocol_semantics_fingerprint": _source_fingerprint(
+            repository, PROTOCOL_SEMANTIC_SOURCE_FILES
+        ),
     }
+
+
+def _source_fingerprint(repository: Path, source_files: tuple[str, ...]) -> str:
+    digest = hashlib.sha256()
+    for relative in source_files:
+        path = repository / relative
+        digest.update(relative.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _write_source_snapshot(output_dir: Path, provenance: dict[str, Any]) -> dict[str, Any]:
+    """Archive the exact protocol sources used by a formal dirty-worktree run.
+
+    A clean commit remains preferred, but a local research run must not become
+    irreproducible merely because its validated implementation has not yet been
+    committed. The artifact contains the same files included in the source
+    fingerprint and is recorded before any provider calls.
+    """
+    repository = Path(__file__).resolve().parents[2]
+    snapshot = output_dir / "SOURCE_SNAPSHOT.tar.gz"
+    provenance_path = output_dir / "SOURCE_PROVENANCE.json"
+    if provenance_path.exists() and snapshot.exists():
+        existing = json.loads(provenance_path.read_text(encoding="utf-8"))
+        if existing.get("source_fingerprint") == provenance["source_fingerprint"]:
+            return existing
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(snapshot, "w:gz") as archive:
+        for relative in PROTOCOL_SOURCE_FILES:
+            archive.add(repository / relative, arcname=relative, recursive=False)
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    payload = {
+        **provenance,
+        "source_snapshot": snapshot.name,
+        "source_snapshot_sha256": digest,
+        "source_snapshot_files": list(PROTOCOL_SOURCE_FILES),
+    }
+    _atomic_json(provenance_path, payload)
+    return payload
+
+
+def freeze_phase1_source_snapshot(
+    output_dir: Path, *, allow_dirty_worktree: bool
+) -> dict[str, Any]:
+    """Freeze the protocol implementation before the first provider call."""
+    return _write_source_snapshot(output_dir, _code_provenance(allow_dirty_worktree))
 
 
 def _archive_interrupted(path: Path, reason: str) -> Path:
@@ -151,10 +216,22 @@ def _aggregate_seed_blocks(
     per_seed = pd.concat([pd.read_csv(path / "per_seed.csv") for path in block_dirs])
     paired = _paired(per_seed, treatments)
     paired_hands = _paired_hand_deltas(per_hand, treatments)
-    inference = inference_table(
-        paired,
-        bootstrap_samples=bootstrap_samples,
-        permutation_samples=permutation_samples,
+    inference = pd.concat(
+        [
+            inference_table(
+                paired,
+                metric="decision_regret_reduction",
+                bootstrap_samples=bootstrap_samples,
+                permutation_samples=permutation_samples,
+            ),
+            inference_table(
+                paired,
+                metric="chips_per_100_delta",
+                bootstrap_samples=bootstrap_samples,
+                permutation_samples=permutation_samples,
+            ),
+        ],
+        ignore_index=True,
     )
     _atomic_csv(output_dir / "per_hand.csv", per_hand)
     _atomic_csv(output_dir / "per_seed.csv", per_seed)
@@ -188,6 +265,9 @@ class FullSimulationRunConfig:
 def run_full_simulation_matrix(config: FullSimulationRunConfig) -> pd.DataFrame:
     cells = phase1_simulation_matrix()
     selected_cells = cells[: config.max_cells] if config.max_cells is not None else cells
+    source_provenance = _write_source_snapshot(
+        config.output_dir, _code_provenance(config.allow_dirty_worktree)
+    )
     plan_payload = {
         "protocol": "phase1-full-simulation-v1",
         "cells": cells,
@@ -196,7 +276,7 @@ def run_full_simulation_matrix(config: FullSimulationRunConfig) -> pd.DataFrame:
         "formation_hands": config.formation_hands,
         "equity_samples": config.equity_samples,
         "mccfr_iterations": config.mccfr_iterations,
-        "code_provenance": _code_provenance(config.allow_dirty_worktree),
+        "code_provenance": source_provenance,
     }
     plan_hash = _payload_hash(plan_payload)
     plan_path = config.output_dir / "FULL_SIMULATION_PLAN.json"
@@ -308,6 +388,9 @@ class LLMConfirmationRunConfig:
     formation_hands: int = 5
     equity_samples: int = 8
     minimum_primary_calls_to_start_block: int = 20
+    # Frozen all-or-nothing allowance for one seed across the three treatment
+    # branches. A block exceeding this allowance fails closed.
+    max_primary_calls_per_paired_block: int = 100
     max_blocks: int | None = None
     allow_dirty_worktree: bool = False
 
@@ -377,6 +460,7 @@ def _llm_block_config(
     output_dir: Path,
     primary_remaining: int,
     retry_remaining: int,
+    formation_protocol_hash: str,
 ) -> Phase1ExperimentConfig:
     return Phase1ExperimentConfig(
         arena=job.arena,
@@ -400,6 +484,7 @@ def _llm_block_config(
         permutation_samples=20,
         output_dir=output_dir,
         preregistered=True,
+        formation_protocol_hash=formation_protocol_hash,
     )
 
 
@@ -410,6 +495,102 @@ def _block_primary_call_upper_bound(config: LLMConfirmationRunConfig, job: Confi
     return decisions_per_hero_hand * (
         config.formation_hands + exploitation_hands * len(job.treatments)
     )
+
+
+def _write_cross_model_paired_blocks(
+    config: LLMConfirmationRunConfig,
+    confirmation_plan: Phase1LLMConfirmationPlan,
+    plan_hash: str,
+) -> pd.DataFrame:
+    """Emit the fail-closed intersection used by paper-level inference.
+
+    Individual serving systems can have valid blocks while the cross-model
+    paper comparison is incomplete.  This file records exactly that distinction
+    and keeps missing blocks visible instead of silently intersecting only the
+    convenient seeds.
+    """
+    rows: list[dict[str, Any]] = []
+    provider_ids = tuple(f"{provider}:{model}" for provider, model in config.models)
+    regimes = tuple(job.stability.value for job in confirmation_plan.jobs)
+    treatments = tuple(treatment.value for treatment in confirmation_plan.jobs[0].treatments)
+    for (provider, model), provider_id in zip(config.models, provider_ids, strict=True):
+        model_slug = f"{provider}__{model}".replace("/", "_").replace(".", "_")
+        model_dir = config.output_dir / "models" / model_slug
+        for job in confirmation_plan.jobs:
+            for block in sorted((model_dir / "jobs" / job.name / "blocks").glob("seed_*")):
+                attempt_path = block / "ATTEMPT.json"
+                if not attempt_path.exists():
+                    continue
+                attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+                seed = int(attempt.get("seed", block.name.removeprefix("seed_")))
+                checkpoint_id = attempt.get("checkpoint_id")
+                if not isinstance(checkpoint_id, str):
+                    checkpoint_id = canonical_checkpoint_id(plan_hash, seed)
+                for treatment in job.treatments:
+                    rows.append(
+                        {
+                            "seed": seed,
+                            "provider": provider_id,
+                            "treatment": treatment.value,
+                            "regime": job.stability.value,
+                            "checkpoint_id": checkpoint_id,
+                            "valid": bool(attempt.get("valid")),
+                        }
+                    )
+    raw = pd.DataFrame(
+        rows,
+        columns=["seed", "provider", "treatment", "regime", "checkpoint_id", "valid"],
+    )
+    if raw.empty:
+        paired = pd.DataFrame(
+            columns=[
+                "seed",
+                "checkpoint_id",
+                "mirror_seat",
+                "valid",
+                "missing_or_duplicate_arms",
+                "provider_gate_failure",
+                "checkpoint_mismatch",
+            ]
+        )
+    else:
+        paired = valid_paired_block_intersection(
+            raw,
+            providers=provider_ids,
+            treatments=treatments,
+            regimes=regimes,
+        )
+    present = set(paired.get("seed", pd.Series(dtype=int)).astype(int))
+    missing_rows = [
+        {
+            "seed": seed,
+            "checkpoint_id": canonical_checkpoint_id(plan_hash, seed),
+            "mirror_seat": seed % 2,
+            "valid": False,
+            "missing_or_duplicate_arms": True,
+            "provider_gate_failure": False,
+            "checkpoint_mismatch": False,
+        }
+        for seed in config.seeds
+        if seed not in present
+    ]
+    if missing_rows:
+        paired = pd.concat([paired, pd.DataFrame(missing_rows)], ignore_index=True)
+    paired = paired.sort_values("seed").reset_index(drop=True)
+    _atomic_csv(config.output_dir / "CROSS_MODEL_PAIRED_BLOCKS.csv", paired)
+    _atomic_csv(config.output_dir / "CROSS_MODEL_PAIRED_BLOCK_ARMS.csv", raw)
+    _atomic_json(
+        config.output_dir / "CROSS_MODEL_PAIRED_BLOCK_STATUS.json",
+        {
+            "plan_hash": plan_hash,
+            "target_seeds": len(config.seeds),
+            "valid_paired_blocks": int(paired["valid"].sum()) if not paired.empty else 0,
+            "providers": list(provider_ids),
+            "treatments": list(treatments),
+            "regimes": list(regimes),
+        },
+    )
+    return paired
 
 
 def _ensure_model_preflight(
@@ -465,6 +646,9 @@ def _ensure_model_preflight(
 
 def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataFrame:
     confirmation_plan = build_llm_confirmation_plan(config.selected_depth)
+    source_provenance = _write_source_snapshot(
+        config.output_dir, _code_provenance(config.allow_dirty_worktree)
+    )
     plan_payload = {
         "protocol": "phase1-llm-confirmation-resumable-v1",
         "selected_depth": config.selected_depth,
@@ -476,7 +660,7 @@ def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataF
         "max_calls_per_model": confirmation_plan.max_calls_per_model,
         "offline_call_budget": confirmation_plan.offline_call_budget,
         "retry_reserve": confirmation_plan.preflight_retry_reserve,
-        "code_provenance": _code_provenance(config.allow_dirty_worktree),
+        "code_provenance": source_provenance,
     }
     plan_hash = _payload_hash(plan_payload)
     plan_path = config.output_dir / "LLM_RESUMABLE_PLAN.json"
@@ -551,7 +735,8 @@ def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataF
             }
             block_primary_upper_bound = _block_primary_call_upper_bound(config, job)
             minimum_to_start = max(
-                config.minimum_primary_calls_to_start_block, block_primary_upper_bound
+                config.minimum_primary_calls_to_start_block,
+                config.max_primary_calls_per_paired_block,
             )
             for seed in config.seeds:
                 if seed in attempted_seeds:
@@ -586,11 +771,16 @@ def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataF
                         model,
                         seed,
                         running,
-                        min(primary_remaining, total_remaining),
+                        min(
+                            config.max_primary_calls_per_paired_block,
+                            primary_remaining,
+                            total_remaining,
+                        ),
                         min(
                             retry_remaining,
                             max(0, total_remaining - min(primary_remaining, total_remaining)),
                         ),
+                        plan_hash,
                     )
                 )
                 ledger = result["provider_gate"]["ledger"]
@@ -601,6 +791,7 @@ def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataF
                     "calls": int(ledger["calls"]),
                     "retries": int(ledger["retries"]),
                     "provider_gate": result["provider_gate"],
+                    "checkpoint_id": str(result["forks"].iloc[0]["checkpoint_id"]),
                 }
                 _atomic_json(running / "ATTEMPT.json", attempt)
                 _finish_running(running, final, attempt)
@@ -646,8 +837,10 @@ def run_llm_confirmation_resumable(config: LLMConfirmationRunConfig) -> pd.DataF
                     "model_total_calls_remaining": total_remaining,
                     "retry_calls_remaining": retry_remaining,
                     "block_primary_call_upper_bound": block_primary_upper_bound,
+                    "block_primary_call_cap": config.max_primary_calls_per_paired_block,
                 }
             )
     frame = pd.DataFrame(statuses)
     _atomic_csv(config.output_dir / "LLM_CONFIRMATION_STATUS.csv", frame)
+    _write_cross_model_paired_blocks(config, confirmation_plan, plan_hash)
     return frame

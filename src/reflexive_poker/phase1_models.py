@@ -754,6 +754,20 @@ class Phase1LLMHero(TreatmentStateMixin, LLMPlayer):
             "total_tokens": response.total_tokens if response else None,
             "cost_usd": response.cost_usd if response else None,
             "response_id": response.response_id if response else None,
+            "reasoning_tokens": response.reasoning_tokens if response else None,
+            "cache_read_tokens": response.cache_read_tokens if response else None,
+            "cache_write_tokens": response.cache_write_tokens if response else None,
+            "actual_model": response.actual_model if response else None,
+            "model_version": response.model_version if response else None,
+            "observed_billed_cost": response.observed_billed_cost if response else None,
+            "estimated_api_equivalent_cost": (
+                response.estimated_api_equivalent_cost if response else None
+            ),
+            "cost_observability": response.cost_observability if response else "unavailable",
+            "model_identity_source": (
+                response.model_identity_source if response else "unavailable"
+            ),
+            "serving_stack_version": response.serving_stack_version if response else None,
             "phase1_treatment": self.treatment.value,
             "reasoning_depth": self.treatment.depth,
             "belief_state_hash": self.belief_digest(),

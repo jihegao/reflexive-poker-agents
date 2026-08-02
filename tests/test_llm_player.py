@@ -109,7 +109,7 @@ def test_opencode_go_provider_parses_json_events_usage_and_cost() -> None:
                 '{"type":"text","sessionID":"ses_test","part":{"text":"```json\\n'
                 + _FakeResponse.output_text.replace('"', '\\"')
                 + '\\n``` trailing text"}}',
-                '{"type":"step_finish","sessionID":"ses_test","part":{"tokens":{"input":12,"output":8,"total":21},"cost":0.0012}}',
+                '{"type":"step_finish","sessionID":"ses_test","modelID":"deepseek-v4-flash","modelVersion":"2026-08-01","part":{"tokens":{"input":12,"output":8,"total":21},"cost":0.0012}}',
             ]
         )
 
@@ -118,7 +118,45 @@ def test_opencode_go_provider_parses_json_events_usage_and_cost() -> None:
     )
     assert response.total_tokens == 21
     assert response.cost_usd == 0.0012
+    assert response.observed_billed_cost == 0.0012
+    assert response.cost_observability == "exact"
     assert response.response_id == "ses_test"
+    assert response.actual_model == "deepseek-v4-flash"
+    assert response.model_version == "2026-08-01"
+
+
+def test_opencode_go_provider_counts_cache_tokens_as_input_usage() -> None:
+    from reflexive_poker.llm_player import OpenCodeGoProvider
+
+    def run(_prompt):
+        return (
+            '{"type":"text","part":{"text":"{\\"action\\":\\"check_call\\",\\"raise_scale\\":0.5,\\"confidence\\":0.5,\\"situation_summary\\":\\"x\\",\\"rationale\\":\\"x\\",\\"self_model\\":\\"x\\",\\"opponent_model\\":\\"x\\",\\"risk_flags\\":[],\\"next_step\\":\\"x\\"}"}}\n'
+            '{"type":"step_finish","part":{"tokens":{"input":6,"output":7,"cache":{"read":11,"write":13}}}}'
+        )
+
+    response = OpenCodeGoProvider(run=run).decide(
+        {"legal_actions": ["check_call"], "hand_index": 0}
+    )
+    assert response.input_tokens == 30
+    assert response.output_tokens == 7
+    assert response.total_tokens == 37
+    assert response.cache_read_tokens == 11
+    assert response.cache_write_tokens == 13
+
+
+def test_opencode_session_export_attests_model_identity(monkeypatch) -> None:
+    from reflexive_poker.llm_player import OpenCodeGoProvider
+
+    class Completed:
+        returncode = 0
+        stdout = (
+            "Exporting session: ses_test\\n"
+            '{"info":{"model":{"providerID":"opencode-go","id":"deepseek-v4-flash"}}}'
+        )
+
+    monkeypatch.setattr("reflexive_poker.llm_player.subprocess.run", lambda *_args, **_kwargs: Completed())
+    provider = OpenCodeGoProvider()
+    assert provider._export_session_model("ses_test") == "deepseek-v4-flash"
 
 
 def test_codex_provider_parses_json_events_and_usage() -> None:
@@ -135,7 +173,7 @@ def test_codex_provider_parses_json_events_and_usage() -> None:
                 '{"type":"item.completed","item":{"type":"agent_message","text":"'
                 + _FakeResponse.output_text.replace('"', '\\"')
                 + '"}}',
-                '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":8}}',
+                '{"type":"turn.completed","model":{"id":"gpt-5.6","version":"2026-08-01"},"usage":{"input_tokens":12,"output_tokens":8}}',
             ]
         )
 
@@ -145,4 +183,38 @@ def test_codex_provider_parses_json_events_and_usage() -> None:
     assert response.input_tokens == 12
     assert response.output_tokens == 8
     assert response.total_tokens == 20
+    assert response.actual_model == "gpt-5.6"
+    assert response.model_version == "2026-08-01"
+    assert response.cost_usd is None
+    assert response.observed_billed_cost is None
+    assert response.cost_observability == "unavailable"
     assert captured[1] == DECISION_SCHEMA
+
+
+def test_codex_cli_selector_is_labelled_when_stream_has_no_model(monkeypatch) -> None:
+    from reflexive_poker.llm_player import CodexProvider
+
+    provider = CodexProvider(model="gpt-5.6-luna")
+    provider.run = lambda _prompt, _schema: "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-1"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"'
+            + _FakeResponse.output_text.replace('"', '\\"')
+            + '"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":8}}',
+        ]
+    )
+
+    class Completed:
+        returncode = 0
+        stdout = "codex-cli 0.146.0"
+
+    monkeypatch.setattr(
+        "reflexive_poker.llm_player.subprocess.run", lambda *_args, **_kwargs: Completed()
+    )
+    response = provider.decide({"legal_actions": ["check_call"], "hand_index": 0})
+
+    assert response.actual_model == "gpt-5.6-luna"
+    assert response.model_identity_source == "cli_selected_model"
+    assert response.response_id == "thread-1"
+    assert response.serving_stack_version == "codex-cli 0.146.0"

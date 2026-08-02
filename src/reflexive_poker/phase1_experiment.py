@@ -32,6 +32,7 @@ from .phase1_models import (
     ReasoningTreatment,
     Stability,
 )
+from .phase1_protocol import canonical_checkpoint_id, mirror_assignment
 from .phase1_statistics import inference_table, large_pot_sensitivity
 
 DEFAULT_TREATMENTS = tuple(ReasoningTreatment)
@@ -77,6 +78,11 @@ class Phase1ExperimentConfig:
     mccfr_iterations: int = 20_000
     output_dir: Path = Path("results/phase1/smoke")
     preregistered: bool = False
+    # The resumable cross-model runner supplies one immutable protocol hash for
+    # every serving system.  It identifies the provider-independent formation
+    # checkpoint, rather than the per-provider manifest (which intentionally
+    # differs because it records the serving system).
+    formation_protocol_hash: str | None = None
 
     def __post_init__(self) -> None:
         if self.horizon <= 0:
@@ -298,6 +304,11 @@ def _make_environment(
                 equity_samples=config.equity_samples,
             )
         )
+    # A paired seed also determines Hero's actual physical seat.  The ordering
+    # controls blinds and deal order in HoldemEnvironment, so this is a real
+    # seat mirror rather than a reporting-only label.
+    if mirror_assignment(seed):
+        agents = [*agents[1:], agents[0]]
     return HoldemEnvironment(
         agents,
         seed=seed,
@@ -310,10 +321,47 @@ def _make_environment(
 
 
 def _hero(environment: HoldemEnvironment) -> Phase1RuleHero | Phase1LLMHero:
-    hero = environment.agents[0]
+    hero = next((agent for agent in environment.agents if agent.name == "hero"), None)
     if not isinstance(hero, Phase1RuleHero | Phase1LLMHero):
-        raise TypeError("Phase 1 environment must put Hero in seat zero")
+        raise TypeError("Phase 1 environment must include exactly one Hero")
     return hero
+
+
+def _install_llm_hero(
+    environment: HoldemEnvironment,
+    *,
+    config: Phase1ExperimentConfig,
+    seed: int,
+    treatment: ReasoningTreatment,
+    provider: BudgetedRetryProvider,
+) -> Phase1LLMHero:
+    """Replace the deterministic formation actor with a continuation actor.
+
+    Formation must not depend on which serving system will later be evaluated.
+    We therefore run it once with the deterministic Phase1RuleHero, deep-copy
+    the resulting public state, then transplant only the public/belief and RNG
+    state into a fresh LLM Hero for each treatment branch.  The deck/RNG and
+    opponent state stay inside the copied environment unchanged.
+    """
+    formed_hero = _hero(environment)
+    if not isinstance(formed_hero, Phase1RuleHero):
+        raise TypeError("shared formation must be performed by Phase1RuleHero")
+    continuation = Phase1LLMHero(
+        formed_hero.name,
+        seed * 1009 + 1,
+        provider,
+        treatment,
+        tuple(agent.name for agent in environment.agents if agent.name != formed_hero.name),
+        _style(config.equity_samples),
+    )
+    continuation.rng.setstate(formed_hero.rng.getstate())
+    continuation.cumulative_reward = formed_hero.cumulative_reward
+    continuation.recent_rewards = copy.deepcopy(formed_hero.recent_rewards)
+    continuation.decision_log = copy.deepcopy(formed_hero.decision_log)
+    continuation.belief_states = copy.deepcopy(formed_hero.belief_states)
+    environment.agents[environment.agents.index(formed_hero)] = continuation
+    environment.agent_by_name[continuation.name] = continuation
+    return continuation
 
 
 def environment_fork_signature(environment: HoldemEnvironment) -> str:
@@ -352,7 +400,7 @@ def _record_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
-        hero_name = next(iter(record.rewards))
+        hero_name = "hero"
         hero_actions = [event for event in record.actions if event.actor == hero_name]
         largest_pot_action = max((event.pot_before for event in record.actions), default=0.0)
         opponent_images = [
@@ -788,6 +836,37 @@ def _provider_gate(
         "opencode-go": ("opencode_go", config.model),
         "codex": ("codex_exec", config.model),
     }[config.provider]
+    actual_models = sorted(
+        {str(trace["actual_model"]) for trace in traces if trace.get("actual_model")}
+    )
+    model_versions = sorted(
+        {str(trace["model_version"]) for trace in traces if trace.get("model_version")}
+    )
+    model_traces = [trace for trace in traces if trace.get("phase1_treatment") != "shared_formation"]
+    actual_identity_matches = config.provider == "mock" or actual_models == [config.model]
+    allowed_identity_sources = {
+        "opencode-go": {"provider_stream", "opencode_session_export"},
+        "codex": {"provider_stream", "cli_selected_model"},
+        "mock": {"unavailable"},
+    }
+    observed_identity_sources = sorted(
+        {
+            str(trace["model_identity_source"])
+            for trace in model_traces
+            if trace.get("model_identity_source")
+        }
+    )
+    identity_source_valid = config.provider == "mock" or (
+        bool(model_traces)
+        and all(
+            trace.get("model_identity_source")
+            in allowed_identity_sources.get(config.provider, set())
+            for trace in model_traces
+        )
+    )
+    complete_model_version_attestation = config.provider == "mock" or (
+        len(model_versions) == 1 and all(bool(trace.get("model_version")) for trace in model_traces)
+    )
     complete_tokens = config.provider == "mock" or ledger.token_observed_calls == ledger.calls
     calls_by_treatment: dict[str, int] = {}
     for trace in traces:
@@ -826,6 +905,8 @@ def _provider_gate(
         and provider_failures == 0
         and fallbacks == 0
         and identities == {expected_identity}
+        and actual_identity_matches
+        and identity_source_valid
         and complete_tokens
         and paired_arms_complete
         and budget_match_valid
@@ -838,6 +919,12 @@ def _provider_gate(
         "model": config.model,
         "expected_identity": list(expected_identity),
         "observed_identities": [list(value) for value in sorted(identities)],
+        "observed_actual_models": actual_models,
+        "observed_model_versions": model_versions,
+        "actual_identity_matches": actual_identity_matches,
+        "observed_model_identity_sources": observed_identity_sources,
+        "model_identity_source_valid": identity_source_valid,
+        "complete_model_version_attestation": complete_model_version_attestation,
         "provider_failures": provider_failures,
         "fallbacks": fallbacks,
         "complete_token_accounting": complete_tokens,
@@ -868,20 +955,20 @@ def _report(
         f"- Provider gate：`{gate['valid']}`",
         "- 本报告只解释冻结模拟器与配置下的配对结果，不证明真实扑克最优性。",
         "",
-        "## 相邻机制对比",
+        "## 配对闭环推断",
         "",
-        "| 对比 | 配对种子 | chips/100 差 | 95% CI | 正向种子率 | Holm p | 去最大种子后 |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| 指标 | 对比 | 配对种子 | 均值差 | 95% CI | 正向种子率 | Holm p | 去最大种子后 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for row in inference.to_dict(orient="records"):
         lines.append(
-            f"| {row['contrast']} | {int(row['pairs'])} | {row['mean_delta']:+.2f} | "
+            f"| {row['metric']} | {row['contrast']} | {int(row['pairs'])} | {row['mean_delta']:+.2f} | "
             f"[{row['ci95_low']:+.2f}, {row['ci95_high']:+.2f}] | "
             f"{row['positive_seed_rate']:.1%} | {row['holm_p']:.4f} | "
             f"{row['leave_largest_out_mean']:+.2f} |"
         )
     if inference.empty:
-        lines.append("| 无可估计对比 | 0 | n/a | n/a | n/a | n/a | n/a |")
+        lines.append("| n/a | 无可估计对比 | 0 | n/a | n/a | n/a | n/a | n/a |")
     trimmed_consistent = bool((paired["trimmed_delta"] > 0).all()) if not paired.empty else False
     lines.extend(
         [
@@ -930,11 +1017,14 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
     fork_rows: list[dict[str, Any]] = []
     completed_heroes: list[Phase1RuleHero | Phase1LLMHero] = []
     for seed in config.seeds:
+        # The common formation fork deliberately has no provider.  Otherwise
+        # each model would create a different public history before the paired
+        # treatment contrast begins, invalidating a cross-model comparison.
         formation = _make_environment(
             config,
             seed,
             ReasoningTreatment.STATE_ONLY,
-            budgeted_provider,
+            None,
             mccfr_policy,
         )
         formation.play(config.formation_hands)
@@ -945,6 +1035,9 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
             {
                 "seed": seed,
                 "signature": signatures[0],
+                "checkpoint_id": canonical_checkpoint_id(
+                    config.formation_protocol_hash or manifest["manifest_hash"], seed
+                ),
                 "identical": identical,
                 "record_count": config.formation_hands,
             }
@@ -957,8 +1050,19 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
             trace["condition"] = "shared_formation"
             trace_rows.append(trace)
         for treatment, branch in zip(config.treatments, branches, strict=True):
-            hero = _hero(branch)
-            hero.set_treatment(treatment)
+            hero = (
+                _install_llm_hero(
+                    branch,
+                    config=config,
+                    seed=seed,
+                    treatment=treatment,
+                    provider=budgeted_provider,
+                )
+                if budgeted_provider is not None
+                else _hero(branch)
+            )
+            if budgeted_provider is None:
+                hero.set_treatment(treatment)
             trace_start = len(hero.phase1_traces if isinstance(hero, Phase1RuleHero) else hero.decision_traces)
             branch.play(config.horizon - config.formation_hands)
             exploitation = branch.records[config.formation_hands :]
@@ -974,7 +1078,8 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
                     if isinstance(agent, ExperimentalOpponent)
                     else "approximate_equilibrium"
                 )
-                for agent in branch.agents[1:]
+                for agent in branch.agents
+                if agent.name != hero.name
             }
             mechanism_rows.extend(
                 _mechanism_rows(hero, exploitation, seed, treatment, true_types)
@@ -999,10 +1104,25 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
     per_seed = _per_seed(per_hand, config)
     paired = _paired(per_seed, config.treatments)
     paired_hands = _paired_hand_deltas(per_hand, config.treatments)
-    inference = inference_table(
-        paired,
-        bootstrap_samples=config.bootstrap_samples,
-        permutation_samples=config.permutation_samples,
+    # Regret is the preregistered primary closed-loop outcome; return remains
+    # secondary and must not silently stand in for it. Holm correction is
+    # applied within each metric family.
+    inference = pd.concat(
+        [
+            inference_table(
+                paired,
+                metric="decision_regret_reduction",
+                bootstrap_samples=config.bootstrap_samples,
+                permutation_samples=config.permutation_samples,
+            ),
+            inference_table(
+                paired,
+                metric="chips_per_100_delta",
+                bootstrap_samples=config.bootstrap_samples,
+                permutation_samples=config.permutation_samples,
+            ),
+        ],
+        ignore_index=True,
     )
     forks = pd.DataFrame(fork_rows)
     if not mechanisms.empty:

@@ -202,6 +202,20 @@ def test_shared_formation_fork_signature_is_identical() -> None:
     )
 
 
+def test_paired_seed_uses_a_real_hero_seat_mirror() -> None:
+    config = Phase1ExperimentConfig(
+        treatments=(ReasoningTreatment.STATE_ONLY,),
+        seeds=(12,),
+        horizon=4,
+        formation_hands=1,
+        equity_samples=1,
+    )
+    first = _make_environment(config, 12, ReasoningTreatment.STATE_ONLY, None, None)
+    mirrored = _make_environment(config, 13, ReasoningTreatment.STATE_ONLY, None, None)
+    assert first.agents[0].name == "hero"
+    assert mirrored.agents[1].name == "hero"
+
+
 def test_rule_phase1_smoke_writes_auditable_artifacts(tmp_path: Path) -> None:
     result = run_phase1_experiment(
         Phase1ExperimentConfig(
@@ -303,7 +317,13 @@ def test_statistics_cover_pairing_holm_and_large_pots() -> None:
             "chips_per_100_delta": [1.0, 2.0, 3.0, 4.0],
         }
     )
-    inference = inference_table(paired, bootstrap_samples=100, permutation_samples=100)
+    inference = inference_table(
+        paired,
+        metric="chips_per_100_delta",
+        bootstrap_samples=100,
+        permutation_samples=100,
+    )
+    assert inference.loc[0, "metric"] == "chips_per_100_delta"
     assert inference.loc[0, "positive_seed_rate"] == 1.0
     sensitivity = large_pot_sensitivity(pd.DataFrame({"reward": [1.0, 2.0, 100.0]}))
     assert sensitivity["largest_abs_reward"] == 100.0
@@ -400,9 +420,14 @@ def test_mock_llm_confirmation_resumes_without_repeating_attempts(tmp_path: Path
     )
     first = run_llm_confirmation_resumable(config)
     assert first["attempted_blocks"].sum() == 1
+    assert set(first["block_primary_call_cap"].dropna()) == {100}
     assert json.loads(
         (tmp_path / "models" / "mock__mock" / "preflight" / "ATTEMPT.json").read_text()
     )["valid"]
+    source_provenance = json.loads((tmp_path / "SOURCE_PROVENANCE.json").read_text())
+    assert source_provenance["worktree_dirty"]
+    assert source_provenance["protocol_semantics_id"] == "prbench-cross-model-v1"
+    assert (tmp_path / source_provenance["source_snapshot"]).exists()
     second = run_llm_confirmation_resumable(config)
     assert second["attempted_blocks"].sum() == 2
     attempts = list(tmp_path.glob("models/mock__mock/jobs/*/blocks/seed_*/ATTEMPT.json"))

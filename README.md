@@ -156,6 +156,11 @@ Real-provider runs are intentionally opt-in. Validate a small zero-failure smoke
 using `--preregistered`; the checked-in defaults and 10,000-call ceilings are documented
 in `configs/phase1.yaml`. The runner never silently substitutes a provider or model.
 
+The frozen four-system Phase 2 preparation manifest is
+[`configs/phase2.yaml`](configs/phase2.yaml). It records the intended treatments and
+Six-max external-validity contract. `paper-phase2-preflight` can run its bounded four-case,
+all-treatment provider gate for the four frozen systems; it does not run any Phase 2 outcome.
+
 Generate the frozen offline cases plus Oracle, Uniform, Frequency, Bayesian, and HMM
 controls without model calls:
 
@@ -177,6 +182,19 @@ JSONL, and does not use the frontend service or product database.
 uv run expctl doctor --output json
 uv run expctl experiment list --output json
 uv run expctl config validate configs/phase1.yaml --output json
+
+uv run expctl phase2-readiness \
+  --config configs/phase2.yaml \
+  --preflight-dir results/experiments/<phase2-preflight-run>/artifacts/preflight \
+  --output-dir results/phase2_readiness/current \
+  --output json
+
+uv run expctl run start \
+  --config configs/phase2.yaml \
+  --experiment paper-phase2-preflight \
+  --request-id phase2-provider-preflight-v1 \
+  --tag phase2-provider-preflight \
+  --output json
 
 uv run expctl run start \
   --config configs/phase1.yaml \
@@ -208,6 +226,12 @@ Formal execution requires a clean Git worktree. The plan freezes the Git commit 
 content fingerprint of the experiment implementation. `--allow-dirty-worktree` exists
 only for bounded rehearsal runs; it is recorded in provenance and should not be used for
 confirmatory evidence.
+
+Live offline understanding runs additionally append each validated model prediction to
+`live_predictions.jsonl` and record the one active call in `LIVE_INFLIGHT.json`.
+They resume only when that journal and the provider ledger reconcile exactly; an
+interruption with an unrecorded in-flight response fails closed rather than replaying a
+call and silently mixing provider accounting.
 
 Start or resume the complete 40-cell, 60-seed rule matrix:
 

@@ -1,5 +1,5 @@
 # Phase 1 preregistration defaults. The CLI flags are the executable source of truth.
-protocol: reflexive-poker-phase1-v1
+protocol: prbench-cross-model-v1
 evidence_layers:
   simulation:
     heads_up:
@@ -56,6 +56,7 @@ paper_phase1:
     hands: 20
     formation_hands: 5
     equity_samples: 8
+    max_primary_calls_per_paired_block: 100
   execution_isolation:
     registry_root: results/experiments
     background_process: true

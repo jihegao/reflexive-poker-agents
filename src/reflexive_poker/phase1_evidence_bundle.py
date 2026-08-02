@@ -82,32 +82,43 @@ def _artifact_provenance(path: Path) -> dict[str, Any]:
         if not metadata_path.exists():
             continue
         metadata = _read_json(metadata_path)
-        snapshot = next(
-            (
-                value
-                for value in (
-                    candidate / "artifacts" / "SOURCE_PROVENANCE.json",
-                    candidate / "SOURCE_PROVENANCE.json",
-                )
-                if value.exists()
-            ),
-            None,
-        )
-        source_archive = next(
-            (
-                value
-                for value in (
-                    candidate / "artifacts" / "SOURCE_SNAPSHOT.tar.gz",
-                    candidate / "SOURCE_SNAPSHOT.tar.gz",
-                )
-                if value.exists()
-            ),
-            None,
+        # Most experiments freeze at ``artifacts/``.  Resumable closed-loop
+        # workers instead freeze at ``artifacts/llm_confirmation/`` so that a
+        # resumed block retains the exact execution source.  Discover exactly
+        # one snapshot under this run's artifact root; multiple snapshots are
+        # ambiguous and deliberately fail closed.
+        artifact_root = candidate / "artifacts"
+        snapshots = {
+            value
+            for value in (
+                path / "SOURCE_PROVENANCE.json",
+                candidate / "SOURCE_PROVENANCE.json",
+            )
+            if value.exists()
+        }
+        if artifact_root.exists():
+            snapshots.update(artifact_root.rglob("SOURCE_PROVENANCE.json"))
+        snapshot = next(iter(snapshots)) if len(snapshots) == 1 else None
+        source_archive = (
+            snapshot.with_name("SOURCE_SNAPSHOT.tar.gz")
+            if snapshot is not None
+            and snapshot.with_name("SOURCE_SNAPSHOT.tar.gz").exists()
+            else None
         )
         snapshot_payload = _read_json(snapshot) if snapshot is not None else {}
         pricing_input = snapshot_payload.get("frozen_inputs", {}).get(
             "frozen_inputs/PRICE_MANIFEST.json", {}
         )
+        # ``expctl`` freezes pricing before dispatching a resumable worker.
+        # That worker's nested source manifest is intentionally code-only, so
+        # retain the run-level price provenance instead of reporting a false
+        # missing-price failure.
+        pricing_sha256 = pricing_input.get("sha256") or metadata.get(
+            "pricing_manifest_sha256"
+        )
+        pricing_frozen_at_utc = snapshot_payload.get(
+            "pricing_manifest_frozen_at_utc"
+        ) or metadata.get("pricing_manifest_frozen_at_utc")
         return {
             "run_id": metadata.get("run_id"),
             "config_hash": metadata.get("config_hash"),
@@ -120,11 +131,9 @@ def _artifact_provenance(path: Path) -> dict[str, Any]:
                 "protocol_semantics_fingerprint"
             )
             or _semantic_snapshot_fingerprint(source_archive),
-            "pricing_manifest_present": bool(pricing_input.get("sha256")),
-            "pricing_manifest_sha256": pricing_input.get("sha256"),
-            "pricing_manifest_frozen_at_utc": snapshot_payload.get(
-                "pricing_manifest_frozen_at_utc"
-            ),
+            "pricing_manifest_present": bool(pricing_sha256),
+            "pricing_manifest_sha256": pricing_sha256,
+            "pricing_manifest_frozen_at_utc": pricing_frozen_at_utc,
         }
     return {
         "run_id": None,
@@ -283,6 +292,11 @@ def audit_phase1_evidence_bundle(
         for section in statuses.values()
         if section["provenance"]["protocol_semantics_id"]
     }
+    protocol_semantics_fingerprints = {
+        section["provenance"]["protocol_semantics_fingerprint"]
+        for section in statuses.values()
+        if section["provenance"]["protocol_semantics_fingerprint"]
+    }
     pricing_manifest_hashes = {
         section["provenance"]["pricing_manifest_sha256"]
         for section in statuses.values()
@@ -301,6 +315,7 @@ def audit_phase1_evidence_bundle(
         and clean_worktrees
         and len(config_hashes) == 1
         and len(protocol_semantics_ids) == 1
+        and len(protocol_semantics_fingerprints) == 1
         and len(pricing_manifest_hashes) == 1
     )
     complete = all(section["complete"] for section in statuses.values()) and provenance_consistent
@@ -316,13 +331,7 @@ def audit_phase1_evidence_bundle(
             "consistent": provenance_consistent,
             "config_hashes": sorted(config_hashes),
             "protocol_semantics_ids": sorted(protocol_semantics_ids),
-            "protocol_semantics_fingerprints": sorted(
-                {
-                    section["provenance"]["protocol_semantics_fingerprint"]
-                    for section in statuses.values()
-                    if section["provenance"]["protocol_semantics_fingerprint"]
-                }
-            ),
+            "protocol_semantics_fingerprints": sorted(protocol_semantics_fingerprints),
             "pricing_manifest_hashes": sorted(pricing_manifest_hashes),
             "source_fingerprints": sorted(
                 {

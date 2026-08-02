@@ -4,7 +4,7 @@ import gzip
 import json
 from pathlib import Path
 
-from reflexive_poker.phase1_evidence_bundle import audit_phase1_evidence_bundle
+from reflexive_poker.phase1_evidence_bundle import _artifact_provenance, audit_phase1_evidence_bundle
 
 
 def _artifact(path: Path, *, valid: bool, predictions: int) -> None:
@@ -140,6 +140,23 @@ def test_evidence_audit_requires_every_paired_closed_loop_seed(tmp_path: Path) -
     assert complete["complete"]
     assert complete["claim_status"] == "ready_for_locked_analysis"
 
+    mixed_semantics = json.loads((paths["codex_offline"] / "SOURCE_PROVENANCE.json").read_text())
+    mixed_semantics["protocol_semantics_fingerprint"] = "different-semantics"
+    (paths["codex_offline"] / "SOURCE_PROVENANCE.json").write_text(
+        json.dumps(mixed_semantics), encoding="utf-8"
+    )
+    inconsistent = audit_phase1_evidence_bundle(
+        tmp_path / "audit-mixed-semantics",
+        deepseek_preflight=paths["deepseek_preflight"],
+        codex_preflight=paths["codex_preflight"],
+        baselines=baselines,
+        deepseek_offline=paths["deepseek_offline"],
+        codex_offline=paths["codex_offline"],
+        closed_loop=closed_loop,
+    )
+    assert not inconsistent["complete"]
+    assert not inconsistent["provenance"]["consistent"]
+
 
 def test_evidence_audit_rejects_duplicate_prediction_keys_with_matching_row_count(
     tmp_path: Path,
@@ -195,3 +212,40 @@ def test_evidence_audit_rejects_missing_or_mixed_price_snapshots(tmp_path: Path)
         closed_loop=paths["closed"],
     )
     assert not result["provenance"]["consistent"]
+
+
+def test_evidence_audit_discovers_resumable_closed_loop_snapshot_below_artifacts(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    closed_loop = run / "artifacts" / "llm_confirmation"
+    closed_loop.mkdir(parents=True)
+    (run / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "closed-loop",
+                "config_hash": "frozen",
+                "pricing_manifest_sha256": "frozen-price",
+                "pricing_manifest_frozen_at_utc": "2026-08-02T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (closed_loop / "SOURCE_PROVENANCE.json").write_text(
+        json.dumps(
+            {
+                "source_fingerprint": "frozen-source",
+                "worktree_dirty": False,
+                "protocol_semantics_id": "prbench-cross-model-v1",
+                "frozen_inputs": {
+                    "frozen_inputs/PRICE_MANIFEST.json": {"sha256": "frozen-price"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    provenance = _artifact_provenance(closed_loop)
+    assert provenance["source_provenance_present"]
+    assert provenance["worktree_dirty"] is False
+    assert provenance["pricing_manifest_present"]
+    assert provenance["pricing_manifest_sha256"] == "frozen-price"

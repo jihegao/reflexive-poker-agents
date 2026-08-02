@@ -1,0 +1,210 @@
+{
+  "protocol": "prbench-cross-model-v1",
+  "paper_phase": 1,
+  "complete": false,
+  "claim_status": "incomplete_no_paper_outcome_claim",
+  "requirements": {
+    "deepseek_preflight": {
+      "path": "results/experiments/20260802T061315Z-a17c6374a1/artifacts/preflight/opencode-go__deepseek-v4-flash",
+      "gate_present": true,
+      "gate_valid": true,
+      "expected_predictions": 20,
+      "raw_predictions": 20,
+      "attempt_audit": {
+        "applicable": true,
+        "valid": true,
+        "path": "/Users/gaojihe/apps/reflexive-poker-agents/results/experiments/20260802T061315Z-a17c6374a1/artifacts/preflight/opencode-go__deepseek-v4-flash/live_provider_attempts.jsonl",
+        "attempts": 20,
+        "raw_failures": 0,
+        "retries": 0
+      },
+      "complete": true,
+      "identity_sources": [
+        "opencode_session_export"
+      ],
+      "coverage": {
+        "valid": true,
+        "case_count": 4,
+        "prediction_keys": 20
+      },
+      "provenance": {
+        "run_id": "20260802T061315Z-a17c6374a1",
+        "config_hash": "e0dd63fcd4c6e9b66ef6e02deea4f970b6ab371a70ac3ee0e7ab54968381a32f",
+        "source_provenance_present": true,
+        "worktree_dirty": false,
+        "source_fingerprint": "11ff67a1ca31b234ccf1ef38e3d1718be6abef0bccb920a59de26b2108b8ef01",
+        "protocol_semantics_id": "prbench-cross-model-v1",
+        "protocol_semantics_fingerprint": "007933d1a9eaab2e844145499381c9b0b0c42bc33badc6b30aba7254092610d1",
+        "pricing_manifest_present": true,
+        "pricing_manifest_sha256": "506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47",
+        "pricing_manifest_frozen_at_utc": "2026-08-02T05:45:00+00:00"
+      }
+    },
+    "codex_preflight": {
+      "path": "results/experiments/20260802T062347Z-3e73af3fb6/artifacts/preflight/codex__gpt-5_6-luna",
+      "gate_present": true,
+      "gate_valid": true,
+      "expected_predictions": 20,
+      "raw_predictions": 20,
+      "attempt_audit": {
+        "applicable": true,
+        "valid": true,
+        "path": "/Users/gaojihe/apps/reflexive-poker-agents/results/experiments/20260802T062347Z-3e73af3fb6/artifacts/preflight/codex__gpt-5_6-luna/live_provider_attempts.jsonl",
+        "attempts": 20,
+        "raw_failures": 0,
+        "retries": 0
+      },
+      "complete": true,
+      "identity_sources": [
+        "cli_selected_model"
+      ],
+      "coverage": {
+        "valid": true,
+        "case_count": 4,
+        "prediction_keys": 20
+      },
+      "provenance": {
+        "run_id": "20260802T062347Z-3e73af3fb6",
+        "config_hash": "e0dd63fcd4c6e9b66ef6e02deea4f970b6ab371a70ac3ee0e7ab54968381a32f",
+        "source_provenance_present": true,
+        "worktree_dirty": false,
+        "source_fingerprint": "11ff67a1ca31b234ccf1ef38e3d1718be6abef0bccb920a59de26b2108b8ef01",
+        "protocol_semantics_id": "prbench-cross-model-v1",
+        "protocol_semantics_fingerprint": "007933d1a9eaab2e844145499381c9b0b0c42bc33badc6b30aba7254092610d1",
+        "pricing_manifest_present": true,
+        "pricing_manifest_sha256": "506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47",
+        "pricing_manifest_frozen_at_utc": "2026-08-02T05:45:00+00:00"
+      }
+    },
+    "baselines": {
+      "path": "results/experiments/20260802T061300Z-35dff2d2ed/artifacts/offline_baselines",
+      "cases": 200,
+      "gate_valid": true,
+      "complete": true,
+      "provenance": {
+        "run_id": "20260802T061300Z-35dff2d2ed",
+        "config_hash": "e0dd63fcd4c6e9b66ef6e02deea4f970b6ab371a70ac3ee0e7ab54968381a32f",
+        "source_provenance_present": true,
+        "worktree_dirty": false,
+        "source_fingerprint": "11ff67a1ca31b234ccf1ef38e3d1718be6abef0bccb920a59de26b2108b8ef01",
+        "protocol_semantics_id": "prbench-cross-model-v1",
+        "protocol_semantics_fingerprint": "007933d1a9eaab2e844145499381c9b0b0c42bc33badc6b30aba7254092610d1",
+        "pricing_manifest_present": true,
+        "pricing_manifest_sha256": "506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47",
+        "pricing_manifest_frozen_at_utc": "2026-08-02T05:45:00+00:00"
+      }
+    },
+    "deepseek_offline": {
+      "path": "results/experiments/20260802T062940Z-e5e3621881/artifacts/offline_model",
+      "gate_present": true,
+      "gate_valid": true,
+      "expected_predictions": 1000,
+      "raw_predictions": 1000,
+      "attempt_audit": {
+        "applicable": true,
+        "valid": true,
+        "path": "/Users/gaojihe/apps/reflexive-poker-agents/results/experiments/20260802T062940Z-e5e3621881/artifacts/offline_model/live_provider_attempts.jsonl",
+        "attempts": 1006,
+        "raw_failures": 6,
+        "retries": 6
+      },
+      "complete": true,
+      "identity_sources": [
+        "opencode_session_export"
+      ],
+      "coverage": {
+        "valid": true,
+        "case_count": 200,
+        "prediction_keys": 1000
+      },
+      "provenance": {
+        "run_id": "20260802T062940Z-e5e3621881",
+        "config_hash": "e0dd63fcd4c6e9b66ef6e02deea4f970b6ab371a70ac3ee0e7ab54968381a32f",
+        "source_provenance_present": true,
+        "worktree_dirty": false,
+        "source_fingerprint": "11ff67a1ca31b234ccf1ef38e3d1718be6abef0bccb920a59de26b2108b8ef01",
+        "protocol_semantics_id": "prbench-cross-model-v1",
+        "protocol_semantics_fingerprint": "007933d1a9eaab2e844145499381c9b0b0c42bc33badc6b30aba7254092610d1",
+        "pricing_manifest_present": true,
+        "pricing_manifest_sha256": "506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47",
+        "pricing_manifest_frozen_at_utc": "2026-08-02T05:45:00+00:00"
+      }
+    },
+    "codex_offline": {
+      "path": "results/experiments/20260802T155559Z-147e3bbc5f/artifacts/offline_model",
+      "gate_present": true,
+      "gate_valid": true,
+      "expected_predictions": 1000,
+      "raw_predictions": 1000,
+      "attempt_audit": {
+        "applicable": true,
+        "valid": true,
+        "path": "/Users/gaojihe/apps/reflexive-poker-agents/results/experiments/20260802T155559Z-147e3bbc5f/artifacts/offline_model/live_provider_attempts.jsonl",
+        "attempts": 1004,
+        "raw_failures": 4,
+        "retries": 4
+      },
+      "complete": true,
+      "identity_sources": [
+        "cli_selected_model"
+      ],
+      "coverage": {
+        "valid": true,
+        "case_count": 200,
+        "prediction_keys": 1000
+      },
+      "provenance": {
+        "run_id": "20260802T155559Z-147e3bbc5f",
+        "config_hash": "e0dd63fcd4c6e9b66ef6e02deea4f970b6ab371a70ac3ee0e7ab54968381a32f",
+        "source_provenance_present": true,
+        "worktree_dirty": false,
+        "source_fingerprint": "11ff67a1ca31b234ccf1ef38e3d1718be6abef0bccb920a59de26b2108b8ef01",
+        "protocol_semantics_id": "prbench-cross-model-v1",
+        "protocol_semantics_fingerprint": "007933d1a9eaab2e844145499381c9b0b0c42bc33badc6b30aba7254092610d1",
+        "pricing_manifest_present": true,
+        "pricing_manifest_sha256": "506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47",
+        "pricing_manifest_frozen_at_utc": "2026-08-02T05:45:00+00:00"
+      }
+    },
+    "closed_loop": {
+      "path": "results/experiments/20260802T203159Z-36b4e2c73b/artifacts/llm_confirmation",
+      "status_present": false,
+      "status": {},
+      "complete": false,
+      "provenance": {
+        "run_id": "20260802T203159Z-36b4e2c73b",
+        "config_hash": "e0dd63fcd4c6e9b66ef6e02deea4f970b6ab371a70ac3ee0e7ab54968381a32f",
+        "source_provenance_present": true,
+        "worktree_dirty": false,
+        "source_fingerprint": "3af09783bf4385cd7eb1cf62b9ad11967d920c3b09f9338267f49253f41a17e0",
+        "protocol_semantics_id": "prbench-cross-model-v1",
+        "protocol_semantics_fingerprint": "a8eddb4e7e4a542c85687087114605586ea81caaf2a76b4f4298de23bdaf966d",
+        "pricing_manifest_present": true,
+        "pricing_manifest_sha256": "506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47",
+        "pricing_manifest_frozen_at_utc": "2026-08-02T05:45:00+00:00"
+      }
+    }
+  },
+  "provenance": {
+    "complete": true,
+    "clean_worktrees": true,
+    "consistent": false,
+    "config_hashes": [
+      "e0dd63fcd4c6e9b66ef6e02deea4f970b6ab371a70ac3ee0e7ab54968381a32f"
+    ],
+    "protocol_semantics_ids": [
+      "prbench-cross-model-v1"
+    ],
+    "protocol_semantics_fingerprints": [
+      "007933d1a9eaab2e844145499381c9b0b0c42bc33badc6b30aba7254092610d1",
+      "a8eddb4e7e4a542c85687087114605586ea81caaf2a76b4f4298de23bdaf966d"
+    ],
+    "pricing_manifest_hashes": [
+      "506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47"
+    ],
+    "source_fingerprints": [
+      "11ff67a1ca31b234ccf1ef38e3d1718be6abef0bccb920a59de26b2108b8ef01",
+      "3af09783bf4385cd7eb1cf62b9ad11967d920c3b09f9338267f49253f41a17e0"
+    ]
+  }
+}

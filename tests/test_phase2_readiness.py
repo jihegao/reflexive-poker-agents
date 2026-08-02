@@ -61,14 +61,45 @@ def test_phase2_readiness_fails_closed_until_identity_price_and_power_are_frozen
         )
     phase2["outcome_design"] = {
         "status": "frozen",
+        "phase1_outcome_lock": "phase1-evidence-bundle-sha256",
         "heads_up_hands": 80,
         "paired_seed_count": 80,
     }
     pricing = tmp_path / "pricing.json"
-    pricing.write_text(json.dumps({"frozen": True, "entries": [{"model": "all"}]}), encoding="utf-8")
+    pricing.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "protocol": config["protocol"],
+                "frozen": True,
+                "frozen_at_utc": "2026-08-02T00:00:00+00:00",
+                "entries": [
+                    {
+                        "provider": system["provider"],
+                        "model": system["model"],
+                        "cost_observability": "unavailable",
+                        "unavailable_reason": "CLI subscription has no per-call bill",
+                    }
+                    for system in phase2["serving_systems"]
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     power = tmp_path / "power.json"
     power.write_text(
-        json.dumps({"valid": True, "protocol": config["protocol"]}), encoding="utf-8"
+        json.dumps(
+            {
+                "valid": True,
+                "protocol": config["protocol"],
+                "analysis_unit": "paired_seed_block",
+                "paired_seed_count": 80,
+                "heads_up_hands": 80,
+                "method": "paired bootstrap from locked Phase 1 pilot",
+                "phase1_outcome_lock": "phase1-evidence-bundle-sha256",
+            }
+        ),
+        encoding="utf-8",
     )
 
     ready = audit_phase2_readiness(

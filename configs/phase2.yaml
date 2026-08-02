@@ -106,6 +106,10 @@ paper_phase2:
   execution_status: prepared_not_runnable
   outcome_design:
     status: pending_phase1_lock
+    # Fill with the immutable Phase 1 evidence-bundle/run identifier before
+    # choosing Phase 2 horizon or sample size.  It prevents outcome-driven
+    # Phase 2 sizing after any Phase 2 result is visible.
+    phase1_outcome_lock: null
     heads_up_hands: null
     paired_seed_count: null
   formal_run_prerequisites:

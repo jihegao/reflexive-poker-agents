@@ -28,6 +28,7 @@ from .phase1_resumable import (
     run_full_simulation_matrix,
     run_llm_confirmation_resumable,
 )
+from .phase2_framework import Phase2OfflineRunConfig, run_phase2_offline
 from .phase2_readiness import audit_phase2_readiness
 
 SCHEMA_VERSION = 1
@@ -40,6 +41,7 @@ EXPERIMENTS = {
     "llm-confirmation": "Run or resume the paired two-model Heads-up confirmation.",
     "paper-phase1": "Run preflight, offline evidence, and paired closed-loop confirmation.",
     "paper-phase2-preflight": "Run the bounded four-system Phase 2 provider preflight only.",
+    "paper-phase2-offline": "Run four-system Phase 2 offline evidence after the frozen readiness gate.",
 }
 
 
@@ -489,6 +491,47 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
             models=_phase2_preflight_models(config),
         )
         _event(run_dir, "phase_completed", phase="phase2_provider_preflight")
+    elif experiment == "paper-phase2-offline":
+        phase2 = config.get("paper_phase2")
+        if not isinstance(phase2, dict):
+            raise ExpctlError("CONFIG_INVALID", "paper-phase2-offline requires paper_phase2")
+        required_inputs = (
+            "phase2_preflight_dir",
+            "phase2_pricing_manifest",
+            "phase2_power_analysis",
+        )
+        missing = [name for name in required_inputs if not metadata.get(name)]
+        if missing:
+            raise ExpctlError(
+                "PHASE2_READINESS_INPUT_MISSING",
+                "paper-phase2-offline requires frozen preflight, pricing, and power artifacts",
+                details={"missing": missing},
+            )
+        source_provenance = _freeze_run_sources(metadata, artifacts)
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
+        readiness = audit_phase2_readiness(
+            artifacts / "phase2_readiness",
+            phase2={**phase2, "protocol": config.get("protocol")},
+            preflight_dir=Path(str(metadata["phase2_preflight_dir"])),
+            pricing_manifest=Path(str(metadata["phase2_pricing_manifest"])),
+            power_analysis=Path(str(metadata["phase2_power_analysis"])),
+        )
+        _event(run_dir, "phase_started", phase="phase2_offline_understanding")
+        run_phase2_offline(
+            Phase2OfflineRunConfig(
+                phase2={**phase2, "protocol": config.get("protocol")},
+                readiness=readiness,
+                output_dir=artifacts / "phase2_offline",
+                case_count=int(phase2.get("offline_understanding", {}).get("case_count", 200)),
+                base_seed=int(phase2.get("offline_understanding", {}).get("base_seed", 20260802)),
+            )
+        )
+        _event(run_dir, "phase_completed", phase="phase2_offline_understanding")
     elif experiment == "simulation":
         simulation = config["evidence_layers"]["simulation"]["heads_up"]
         seeds = simulation.get("seeds", {})
@@ -725,6 +768,9 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "max_blocks": args.max_blocks,
         "allow_dirty_worktree": args.allow_dirty_worktree,
+        "phase2_preflight_dir": getattr(args, "phase2_preflight_dir", None),
+        "phase2_pricing_manifest": getattr(args, "phase2_pricing_manifest", None),
+        "phase2_power_analysis": getattr(args, "phase2_power_analysis", None),
         "worker_command": worker_command,
     }
     if pricing is not None and pricing_artifact is not None:
@@ -952,6 +998,18 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--provider")
     start.add_argument("--model")
     start.add_argument("--max-blocks", type=int)
+    start.add_argument(
+        "--phase2-preflight-dir",
+        help="Frozen four-system preflight artifact directory required by paper-phase2-offline",
+    )
+    start.add_argument(
+        "--phase2-pricing-manifest",
+        help="Frozen four-system price manifest required by paper-phase2-offline",
+    )
+    start.add_argument(
+        "--phase2-power-analysis",
+        help="Frozen paired-seed power analysis required by paper-phase2-offline",
+    )
     start.add_argument("--allow-dirty-worktree", action="store_true")
     start.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
     start.add_argument("--output", choices=("human", "json"), default="human")

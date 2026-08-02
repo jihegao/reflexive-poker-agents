@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from reflexive_poker import expctl
-from reflexive_poker.expctl import _load_config, _start
+from reflexive_poker.expctl import ExpctlError, _load_config, _run_experiment, _start
 
 
 def test_expctl_validates_phase1_config() -> None:
@@ -148,3 +148,18 @@ def test_phase2_readiness_cli_writes_fail_closed_status(
     result = json.loads(capsys.readouterr().out)
     assert not result["ready_for_formal_outcomes"]
     assert (tmp_path / "readiness" / "PHASE2_READINESS.json").exists()
+
+
+def test_phase2_offline_run_fails_before_any_outcome_call_without_frozen_inputs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = []
+    monkeypatch.setattr(expctl, "run_phase2_offline", lambda *args, **kwargs: calls.append(args))
+    metadata = {
+        "config_path": str(Path("configs/phase2.yaml").resolve()),
+        "experiment": "paper-phase2-offline",
+        "allow_dirty_worktree": True,
+    }
+    with pytest.raises(ExpctlError, match="requires frozen preflight"):
+        _run_experiment(metadata, tmp_path)
+    assert calls == []

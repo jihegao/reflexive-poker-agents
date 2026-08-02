@@ -219,6 +219,7 @@ post_formation_chips_per_100
 - zero unresolved provider failure；
 - zero fallback；
 - token、latency 和可观测成本字段完整；
+- 在任何 outcome 调用前冻结带日期的价格快照；快照的 SHA-256、原始字节与冻结时间必须进入 run metadata、artifact 和源码归档；
 - prompt、history window、action space、输出上限和 temperature 冻结；
 - 原始失败和 schema repair 尝试进入独立审计账本。
 
@@ -465,6 +466,7 @@ C_A <= C_B
 开始正式收费实验前仍需完成：
 
 - [ ] DeepSeek 与 Codex 各 20 次、覆盖五个 treatment 的真实 provider 预检。
+- [x] 价格快照的 hash-lock、run-local artifact 和证据审计门禁已实现；每次正式 run 仍需在调用前验证它。
 - [ ] 冻结模型版本、价格、prompt、schema、case manifest 和源码指纹。
 - [ ] 在独立干净 worktree 执行双模型 200-case 正式离线实验。
 - [ ] 在查看 outcome 前冻结 30 或 40 paired seeds 和闭环预算。

@@ -131,7 +131,12 @@ def _source_fingerprint(repository: Path, source_files: tuple[str, ...]) -> str:
     return digest.hexdigest()
 
 
-def _write_source_snapshot(output_dir: Path, provenance: dict[str, Any]) -> dict[str, Any]:
+def _write_source_snapshot(
+    output_dir: Path,
+    provenance: dict[str, Any],
+    *,
+    frozen_inputs: dict[str, Path] | None = None,
+) -> dict[str, Any]:
     """Archive the exact protocol sources used by a formal dirty-worktree run.
 
     A clean commit remains preferred, but a local research run must not become
@@ -140,6 +145,29 @@ def _write_source_snapshot(output_dir: Path, provenance: dict[str, Any]) -> dict
     fingerprint and is recorded before any provider calls.
     """
     repository = Path(__file__).resolve().parents[2]
+    frozen_inputs = frozen_inputs or {}
+    for arcname, input_path in frozen_inputs.items():
+        if Path(arcname).is_absolute() or ".." in Path(arcname).parts:
+            raise ValueError("frozen source input archive name must be relative")
+        if not input_path.exists():
+            raise FileNotFoundError(f"frozen source input does not exist: {input_path}")
+    if frozen_inputs:
+        digest = hashlib.sha256()
+        digest.update(str(provenance["source_fingerprint"]).encode())
+        for arcname, input_path in sorted(frozen_inputs.items()):
+            digest.update(arcname.encode())
+            digest.update(input_path.read_bytes())
+        provenance = {
+            **provenance,
+            "source_fingerprint": digest.hexdigest(),
+            "frozen_inputs": {
+                arcname: {
+                    "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                    "artifact_path": str(input_path),
+                }
+                for arcname, input_path in sorted(frozen_inputs.items())
+            },
+        }
     snapshot = output_dir / "SOURCE_SNAPSHOT.tar.gz"
     provenance_path = output_dir / "SOURCE_PROVENANCE.json"
     if provenance_path.exists() and snapshot.exists():
@@ -150,22 +178,31 @@ def _write_source_snapshot(output_dir: Path, provenance: dict[str, Any]) -> dict
     with tarfile.open(snapshot, "w:gz") as archive:
         for relative in PROTOCOL_SOURCE_FILES:
             archive.add(repository / relative, arcname=relative, recursive=False)
+        for arcname, input_path in sorted(frozen_inputs.items()):
+            archive.add(input_path, arcname=arcname, recursive=False)
     digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
     payload = {
         **provenance,
         "source_snapshot": snapshot.name,
         "source_snapshot_sha256": digest,
-        "source_snapshot_files": list(PROTOCOL_SOURCE_FILES),
+        "source_snapshot_files": [*PROTOCOL_SOURCE_FILES, *sorted(frozen_inputs)],
     }
     _atomic_json(provenance_path, payload)
     return payload
 
 
 def freeze_phase1_source_snapshot(
-    output_dir: Path, *, allow_dirty_worktree: bool
+    output_dir: Path,
+    *,
+    allow_dirty_worktree: bool,
+    frozen_inputs: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
     """Freeze the protocol implementation before the first provider call."""
-    return _write_source_snapshot(output_dir, _code_provenance(allow_dirty_worktree))
+    return _write_source_snapshot(
+        output_dir,
+        _code_provenance(allow_dirty_worktree),
+        frozen_inputs=frozen_inputs,
+    )
 
 
 def _archive_interrupted(path: Path, reason: str) -> Path:

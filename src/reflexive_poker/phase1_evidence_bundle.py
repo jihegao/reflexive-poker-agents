@@ -105,6 +105,9 @@ def _artifact_provenance(path: Path) -> dict[str, Any]:
             None,
         )
         snapshot_payload = _read_json(snapshot) if snapshot is not None else {}
+        pricing_input = snapshot_payload.get("frozen_inputs", {}).get(
+            "frozen_inputs/PRICE_MANIFEST.json", {}
+        )
         return {
             "run_id": metadata.get("run_id"),
             "config_hash": metadata.get("config_hash"),
@@ -117,6 +120,11 @@ def _artifact_provenance(path: Path) -> dict[str, Any]:
                 "protocol_semantics_fingerprint"
             )
             or _semantic_snapshot_fingerprint(source_archive),
+            "pricing_manifest_present": bool(pricing_input.get("sha256")),
+            "pricing_manifest_sha256": pricing_input.get("sha256"),
+            "pricing_manifest_frozen_at_utc": snapshot_payload.get(
+                "pricing_manifest_frozen_at_utc"
+            ),
         }
     return {
         "run_id": None,
@@ -126,6 +134,9 @@ def _artifact_provenance(path: Path) -> dict[str, Any]:
         "source_fingerprint": None,
         "protocol_semantics_id": None,
         "protocol_semantics_fingerprint": None,
+        "pricing_manifest_present": False,
+        "pricing_manifest_sha256": None,
+        "pricing_manifest_frozen_at_utc": None,
     }
 
 
@@ -183,6 +194,7 @@ def _provider_status(path: Path, *, expected_predictions: int) -> dict[str, Any]
             and coverage["valid"]
             and provenance["source_provenance_present"]
             and provenance["worktree_dirty"] is False
+            and provenance["pricing_manifest_present"]
         ),
         "identity_sources": gate.get("observed_model_identity_sources", []),
         "coverage": coverage,
@@ -225,6 +237,7 @@ def audit_phase1_evidence_bundle(
                 and bool(baseline_gate.get("valid"))
                 and baseline_provenance["source_provenance_present"]
                 and baseline_provenance["worktree_dirty"] is False
+                and baseline_provenance["pricing_manifest_present"]
             ),
             "provenance": baseline_provenance,
         },
@@ -253,6 +266,7 @@ def audit_phase1_evidence_bundle(
             closed_loop_complete
             and _artifact_provenance(closed_loop)["source_provenance_present"]
             and _artifact_provenance(closed_loop)["worktree_dirty"] is False
+            and _artifact_provenance(closed_loop)["pricing_manifest_present"]
         ),
         "provenance": _artifact_provenance(closed_loop),
     }
@@ -266,8 +280,15 @@ def audit_phase1_evidence_bundle(
         for section in statuses.values()
         if section["provenance"]["protocol_semantics_id"]
     }
+    pricing_manifest_hashes = {
+        section["provenance"]["pricing_manifest_sha256"]
+        for section in statuses.values()
+        if section["provenance"]["pricing_manifest_sha256"]
+    }
     provenance_complete = all(
-        section["provenance"]["source_provenance_present"] for section in statuses.values()
+        section["provenance"]["source_provenance_present"]
+        and section["provenance"]["pricing_manifest_present"]
+        for section in statuses.values()
     )
     clean_worktrees = all(
         section["provenance"]["worktree_dirty"] is False for section in statuses.values()
@@ -277,6 +298,7 @@ def audit_phase1_evidence_bundle(
         and clean_worktrees
         and len(config_hashes) == 1
         and len(protocol_semantics_ids) == 1
+        and len(pricing_manifest_hashes) == 1
     )
     complete = all(section["complete"] for section in statuses.values()) and provenance_consistent
     result = {
@@ -298,6 +320,7 @@ def audit_phase1_evidence_bundle(
                     if section["provenance"]["protocol_semantics_fingerprint"]
                 }
             ),
+            "pricing_manifest_hashes": sorted(pricing_manifest_hashes),
             "source_fingerprints": sorted(
                 {
                     section["provenance"]["source_fingerprint"]

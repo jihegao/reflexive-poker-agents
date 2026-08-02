@@ -155,6 +155,11 @@ PYTHONPATH=src uv run python scripts/run_phase1_experiment.py \
 Real-provider runs are intentionally opt-in. Validate a small zero-failure smoke before
 using `--preregistered`; the checked-in defaults and 10,000-call ceilings are documented
 in `configs/phase1.yaml`. The runner never silently substitutes a provider or model.
+Formal Phase 1 starts also hash-lock and copy the dated
+[`price snapshot`](configs/pricing/phase1-2026-08-02.json) into each run before the
+worker starts; a missing, changed, incomplete, or post-dated snapshot is fail-closed.
+Provider-reported billed cost remains authoritative, while the Codex CLI's unavailable
+per-call bill is recorded as unavailable rather than zero.
 
 The frozen four-system Phase 2 preparation manifest is
 [`configs/phase2.yaml`](configs/phase2.yaml). It records the intended treatments and

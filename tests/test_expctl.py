@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,13 @@ def test_expctl_foreground_run_is_idempotent(tmp_path: Path) -> None:
     events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
     assert events[-1]["event"] == "run_completed"
     assert (Path(first["artifact_dir"]) / "offline_baselines" / "cases.jsonl.gz").exists()
+    assert first["pricing_manifest_sha256"] == hashlib.sha256(
+        Path("configs/pricing/phase1-2026-08-02.json").read_bytes()
+    ).hexdigest()
+    frozen_price = run_dir / "frozen_inputs" / "PRICE_MANIFEST.json"
+    assert frozen_price.exists()
+    with tarfile.open(Path(first["artifact_dir"]) / "SOURCE_SNAPSHOT.tar.gz", "r:gz") as archive:
+        assert archive.extractfile("frozen_inputs/PRICE_MANIFEST.json").read() == frozen_price.read_bytes()
 
 
 def test_provider_preflight_can_target_one_frozen_serving_system(monkeypatch, tmp_path: Path) -> None:

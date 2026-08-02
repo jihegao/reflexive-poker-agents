@@ -18,6 +18,9 @@ def _artifact(path: Path, *, valid: bool, predictions: int) -> None:
                 "worktree_dirty": False,
                 "protocol_semantics_id": "prbench-cross-model-v1",
                 "protocol_semantics_fingerprint": "frozen-semantics",
+                "frozen_inputs": {
+                    "frozen_inputs/PRICE_MANIFEST.json": {"sha256": "frozen-price"}
+                },
             }
         ),
         encoding="utf-8",
@@ -155,3 +158,32 @@ def test_evidence_audit_rejects_duplicate_prediction_keys_with_matching_row_coun
 
     assert not result["requirements"]["deepseek_preflight"]["coverage"]["valid"]
     assert not result["requirements"]["deepseek_preflight"]["complete"]
+
+
+def test_evidence_audit_rejects_missing_or_mixed_price_snapshots(tmp_path: Path) -> None:
+    paths = {name: tmp_path / name for name in ("deepseek", "codex", "baselines", "closed")}
+    _artifact(paths["deepseek"], valid=True, predictions=20)
+    _artifact(paths["codex"], valid=True, predictions=20)
+    _artifact(paths["baselines"], valid=True, predictions=0)
+    with gzip.open(paths["baselines"] / "cases.jsonl.gz", "wt", encoding="utf-8") as handle:
+        for _ in range(200):
+            handle.write("{}\n")
+    _artifact(paths["closed"], valid=True, predictions=0)
+    (paths["closed"] / "CROSS_MODEL_PAIRED_BLOCK_STATUS.json").write_text(
+        json.dumps({"target_seeds": 1, "valid_paired_blocks": 1}), encoding="utf-8"
+    )
+    # Re-use the small complete artifacts for both 1,000-call requirements only
+    # to assert provenance failure before outcome coverage is considered.
+    source = json.loads((paths["codex"] / "SOURCE_PROVENANCE.json").read_text())
+    source["frozen_inputs"]["frozen_inputs/PRICE_MANIFEST.json"]["sha256"] = "different-price"
+    (paths["codex"] / "SOURCE_PROVENANCE.json").write_text(json.dumps(source), encoding="utf-8")
+    result = audit_phase1_evidence_bundle(
+        tmp_path / "audit",
+        deepseek_preflight=paths["deepseek"],
+        codex_preflight=paths["codex"],
+        baselines=paths["baselines"],
+        deepseek_offline=tmp_path / "missing-deepseek-offline",
+        codex_offline=tmp_path / "missing-codex-offline",
+        closed_loop=paths["closed"],
+    )
+    assert not result["provenance"]["consistent"]

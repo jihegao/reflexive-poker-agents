@@ -20,6 +20,7 @@ import yaml
 
 from .phase1_models import ProviderBudget, ReasoningTreatment
 from .phase1_offline import OfflineBenchmarkConfig, run_offline_benchmark
+from .phase1_pricing import PricingManifestError, resolve_phase1_pricing
 from .phase1_resumable import (
     FullSimulationRunConfig,
     LLMConfirmationRunConfig,
@@ -141,6 +142,10 @@ def _load_config(path: Path) -> dict[str, Any]:
                     details={"field": "paper_phase2.serving_systems"},
                 )
             identities.add(identity)
+    try:
+        resolve_phase1_pricing(path.resolve(), payload)
+    except PricingManifestError as exc:
+        raise ExpctlError("PRICING_MANIFEST_INVALID", str(exc)) from exc
     return payload
 
 
@@ -314,6 +319,35 @@ def _offline_config(
     )
 
 
+def _freeze_run_sources(metadata: dict[str, Any], artifacts: Path) -> dict[str, Any]:
+    """Archive the byte-for-byte price input copied before the worker spawned."""
+    pricing_path = metadata.get("pricing_manifest_artifact")
+    frozen_inputs: dict[str, Path] | None = None
+    if pricing_path is not None:
+        path = Path(str(pricing_path))
+        expected = metadata.get("pricing_manifest_sha256")
+        if not path.exists():
+            raise ExpctlError("PRICING_MANIFEST_MISSING", "run-local pricing manifest is missing")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            raise ExpctlError("PRICING_MANIFEST_MUTATED", "run-local pricing manifest hash changed")
+        frozen_inputs = {"frozen_inputs/PRICE_MANIFEST.json": path}
+    provenance = freeze_phase1_source_snapshot(
+        artifacts,
+        allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
+        frozen_inputs=frozen_inputs,
+    )
+    if pricing_path is not None:
+        provenance = {
+            **provenance,
+            "pricing_manifest_artifact": str(pricing_path),
+            "pricing_manifest_sha256": metadata["pricing_manifest_sha256"],
+            "pricing_manifest_frozen_at_utc": metadata["pricing_manifest_frozen_at_utc"],
+        }
+        _atomic_json(artifacts / "SOURCE_PROVENANCE.json", provenance)
+    return provenance
+
+
 def _run_offline_models(
     config: dict[str, Any],
     artifact_dir: Path,
@@ -359,10 +393,7 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
     artifacts.mkdir(parents=True, exist_ok=True)
     phase = _paper_config(config)
     if experiment == "offline-baselines":
-        source_provenance = freeze_phase1_source_snapshot(
-            artifacts,
-            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
-        )
+        source_provenance = _freeze_run_sources(metadata, artifacts)
         _event(
             run_dir,
             "source_frozen",
@@ -387,10 +418,7 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                 "MODEL_REQUIRED",
                 "offline-model requires --provider and --model",
             )
-        source_provenance = freeze_phase1_source_snapshot(
-            artifacts,
-            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
-        )
+        source_provenance = _freeze_run_sources(metadata, artifacts)
         _event(
             run_dir,
             "source_frozen",
@@ -422,10 +450,7 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                 "MODEL_REQUIRED",
                 "provider-preflight requires both --provider and --model when narrowed",
             )
-        source_provenance = freeze_phase1_source_snapshot(
-            artifacts,
-            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
-        )
+        source_provenance = _freeze_run_sources(metadata, artifacts)
         _event(
             run_dir,
             "source_frozen",
@@ -449,10 +474,7 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                 "paper-phase2-preflight is fixed at four cases per treatment",
                 details={"field": "paper_phase2.preflight_cases", "value": preflight_cases},
             )
-        source_provenance = freeze_phase1_source_snapshot(
-            artifacts,
-            allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
-        )
+        source_provenance = _freeze_run_sources(metadata, artifacts)
         _event(
             run_dir,
             "source_frozen",
@@ -485,10 +507,7 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
         )
     elif experiment in {"llm-confirmation", "paper-phase1"}:
         if experiment == "paper-phase1":
-            source_provenance = freeze_phase1_source_snapshot(
-                artifacts,
-                allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
-            )
+            source_provenance = _freeze_run_sources(metadata, artifacts)
             _event(
                 run_dir,
                 "source_frozen",
@@ -652,6 +671,11 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     config_path = Path(args.config).resolve()
     config = _load_config(config_path)
+    created_at = _now()
+    try:
+        pricing = resolve_phase1_pricing(config_path, config, run_created_at=created_at)
+    except PricingManifestError as exc:
+        raise ExpctlError("PRICING_MANIFEST_INVALID", str(exc)) from exc
     config_hash = _config_hash(config)
     if args.request_id:
         existing = _find_idempotent(root, args.request_id)
@@ -667,6 +691,13 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
     run_id = f"{stamp}-{uuid.uuid4().hex[:10]}"
     run_dir = _run_dir(root, run_id)
     run_dir.mkdir(parents=True)
+    pricing_artifact: Path | None = None
+    if pricing is not None:
+        pricing_artifact = run_dir / "frozen_inputs" / "PRICE_MANIFEST.json"
+        pricing_artifact.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(pricing.path, pricing_artifact)
+        if hashlib.sha256(pricing_artifact.read_bytes()).hexdigest() != pricing.sha256:
+            raise ExpctlError("PRICING_MANIFEST_COPY_FAILED", "pricing manifest artifact hash mismatch")
     worker_command = [
         sys.executable,
         "-m",
@@ -684,8 +715,8 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
         "tag": args.tag,
         "experiment": args.experiment,
         "state": "created",
-        "created_at": _now(),
-        "updated_at": _now(),
+        "created_at": created_at,
+        "updated_at": created_at,
         "config_path": str(config_path),
         "config_hash": config_hash,
         "artifact_dir": str(run_dir / "artifacts"),
@@ -696,8 +727,25 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
         "allow_dirty_worktree": args.allow_dirty_worktree,
         "worker_command": worker_command,
     }
+    if pricing is not None and pricing_artifact is not None:
+        metadata.update(
+            {
+                "pricing_manifest_artifact": str(pricing_artifact),
+                "pricing_manifest_sha256": pricing.sha256,
+                "pricing_manifest_frozen_at_utc": pricing.frozen_at_utc,
+                "pricing_manifest_source_path": str(pricing.path),
+            }
+        )
     _atomic_json(_metadata_path(run_dir), metadata)
     _event(run_dir, "run_created", run_id=run_id, experiment=args.experiment)
+    if pricing is not None:
+        _event(
+            run_dir,
+            "pricing_frozen",
+            pricing_manifest_sha256=pricing.sha256,
+            pricing_manifest_frozen_at_utc=pricing.frozen_at_utc,
+            pricing_manifest_artifact=str(pricing_artifact),
+        )
     if args.foreground:
         _update_run(run_dir, state="queued", pid=os.getpid())
         exit_code = _worker(run_dir)

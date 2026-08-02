@@ -30,6 +30,7 @@ from reflexive_poker.phase1_models import (
     ReasoningTreatment,
     Stability,
 )
+from reflexive_poker.phase1_protocol import validate_closed_loop_completion
 from reflexive_poker.phase1_resumable import (
     FullSimulationRunConfig,
     LLMConfirmationRunConfig,
@@ -221,6 +222,43 @@ def test_paired_seed_uses_a_real_hero_seat_mirror() -> None:
     mirrored = _make_environment(config, 13, ReasoningTreatment.STATE_ONLY, None, None)
     assert first.agents[0].name == "hero"
     assert mirrored.agents[1].name == "hero"
+
+
+def test_closed_loop_completion_validator_rejects_any_missing_paired_arm() -> None:
+    providers = ("deepseek", "codex")
+    treatments = ("state_only", "d1_budget_matched", "recursive_d2")
+    regimes = ("fixed", "adaptive")
+    rows = [
+        {
+            "seed": seed,
+            "provider": provider,
+            "treatment": treatment,
+            "regime": regime,
+            "checkpoint_id": f"checkpoint-{seed}",
+            "valid": True,
+        }
+        for seed in (1, 2)
+        for provider in providers
+        for treatment in treatments
+        for regime in regimes
+    ]
+    complete = validate_closed_loop_completion(
+        pd.DataFrame(rows),
+        providers=providers,
+        treatments=treatments,
+        regimes=regimes,
+        target_seeds=(1, 2),
+    )
+    assert complete["formal_completion_valid"] is True
+    incomplete = validate_closed_loop_completion(
+        pd.DataFrame(rows[:-1]),
+        providers=providers,
+        treatments=treatments,
+        regimes=regimes,
+        target_seeds=(1, 2),
+    )
+    assert incomplete["formal_completion_valid"] is False
+    assert incomplete["valid_paired_blocks"] == 1
 
 
 def test_rule_phase1_smoke_writes_auditable_artifacts(tmp_path: Path) -> None:

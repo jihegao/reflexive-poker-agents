@@ -254,7 +254,8 @@ def audit_phase1_evidence_bundle(
     if closed_loop_status.exists():
         payload = _read_json(closed_loop_status)
         closed_loop_complete = (
-            int(payload.get("target_seeds", 0)) > 0
+            payload.get("formal_completion_valid") is True
+            and int(payload.get("target_seeds", 0)) > 0
             and int(payload.get("valid_paired_blocks", 0)) == int(payload.get("target_seeds", 0))
         )
     else:

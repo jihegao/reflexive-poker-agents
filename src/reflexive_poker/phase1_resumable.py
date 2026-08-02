@@ -26,7 +26,11 @@ from .phase1_experiment import (
 )
 from .phase1_models import ProviderBudget, ReasoningTreatment
 from .phase1_offline import OfflineBenchmarkConfig, run_offline_benchmark
-from .phase1_protocol import canonical_checkpoint_id, valid_paired_block_intersection
+from .phase1_protocol import (
+    canonical_checkpoint_id,
+    valid_paired_block_intersection,
+    validate_closed_loop_completion,
+)
 from .phase1_statistics import inference_table
 
 REQUIRED_BLOCK_FILES = (
@@ -616,15 +620,21 @@ def _write_cross_model_paired_blocks(
     paired = paired.sort_values("seed").reset_index(drop=True)
     _atomic_csv(config.output_dir / "CROSS_MODEL_PAIRED_BLOCKS.csv", paired)
     _atomic_csv(config.output_dir / "CROSS_MODEL_PAIRED_BLOCK_ARMS.csv", raw)
+    completion = validate_closed_loop_completion(
+        raw,
+        providers=provider_ids,
+        treatments=treatments,
+        regimes=regimes,
+        target_seeds=config.seeds,
+    )
     _atomic_json(
         config.output_dir / "CROSS_MODEL_PAIRED_BLOCK_STATUS.json",
         {
             "plan_hash": plan_hash,
-            "target_seeds": len(config.seeds),
-            "valid_paired_blocks": int(paired["valid"].sum()) if not paired.empty else 0,
             "providers": list(provider_ids),
             "treatments": list(treatments),
             "regimes": list(regimes),
+            **completion,
         },
     )
     return paired

@@ -105,7 +105,10 @@ def test_evidence_audit_requires_every_paired_closed_loop_seed(tmp_path: Path) -
     closed_loop = tmp_path / "closed_loop"
     _artifact(closed_loop, valid=True, predictions=0)
     (closed_loop / "CROSS_MODEL_PAIRED_BLOCK_STATUS.json").write_text(
-        json.dumps({"target_seeds": 40, "valid_paired_blocks": 39}), encoding="utf-8"
+        json.dumps(
+            {"target_seeds": 40, "valid_paired_blocks": 39, "formal_completion_valid": False}
+        ),
+        encoding="utf-8",
     )
 
     incomplete = audit_phase1_evidence_bundle(
@@ -120,7 +123,10 @@ def test_evidence_audit_requires_every_paired_closed_loop_seed(tmp_path: Path) -
     assert not incomplete["complete"]
 
     (closed_loop / "CROSS_MODEL_PAIRED_BLOCK_STATUS.json").write_text(
-        json.dumps({"target_seeds": 40, "valid_paired_blocks": 40}), encoding="utf-8"
+        json.dumps(
+            {"target_seeds": 40, "valid_paired_blocks": 40, "formal_completion_valid": True}
+        ),
+        encoding="utf-8",
     )
     complete = audit_phase1_evidence_bundle(
         tmp_path / "audit-complete",

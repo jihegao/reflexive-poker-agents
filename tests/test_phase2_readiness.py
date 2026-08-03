@@ -19,6 +19,7 @@ def _system_artifact(path: Path, model: str) -> None:
                 "actual_identity_matches": True,
                 "model_identity_source_valid": True,
                 "observed_actual_models": [model],
+                "observed_model_versions": ["provider-returned-version"],
             }
         ),
         encoding="utf-8",
@@ -110,3 +111,34 @@ def test_phase2_readiness_fails_closed_until_identity_price_and_power_are_frozen
         power_analysis=power,
     )
     assert ready["ready_for_formal_outcomes"]
+
+
+def test_phase2_readiness_rejects_a_frozen_version_not_attested_by_preflight(
+    tmp_path: Path,
+) -> None:
+    config = yaml.safe_load(Path("configs/phase2.yaml").read_text(encoding="utf-8"))
+    phase2 = config["paper_phase2"]
+    preflight = tmp_path / "preflight"
+    for system in phase2["serving_systems"]:
+        _system_artifact(
+            preflight
+            / f"{system['provider']}__{system['model']}".replace("/", "_").replace(".", "_"),
+            system["model"],
+        )
+    for lock in phase2["identity_locks"]:
+        lock.update(
+            {
+                "status": "frozen",
+                "returned_model_id": lock["serving_system"].split("/", 1)[1],
+                "returned_version_id": "different-version",
+            }
+        )
+    result = audit_phase2_readiness(
+        tmp_path / "readiness",
+        phase2=phase2,
+        preflight_dir=preflight,
+        pricing_manifest=None,
+        power_analysis=None,
+    )
+    assert not result["ready_for_formal_outcomes"]
+    assert not all(item["version_matches_preflight"] for item in result["identity_locks"].values())

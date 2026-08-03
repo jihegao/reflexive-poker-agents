@@ -98,6 +98,7 @@ def audit_phase2_readiness(
         gate = _read_json(preflight_dir / _slug(provider, model) / "provider_gate.json")
         lock = locks.get(name, {})
         actual = gate.get("observed_actual_models", [])
+        observed_versions = gate.get("observed_model_versions", [])
         preflight[name] = {
             "valid": bool(gate.get("valid")),
             "expected_predictions": gate.get("expected_predictions"),
@@ -112,6 +113,10 @@ def audit_phase2_readiness(
             "matches_preflight": (
                 isinstance(lock.get("returned_model_id"), str)
                 and lock.get("returned_model_id") in actual
+            ),
+            "version_matches_preflight": (
+                isinstance(lock.get("returned_version_id"), str)
+                and lock.get("returned_version_id") in observed_versions
             ),
         }
     pricing = _read_json(pricing_manifest) if pricing_manifest is not None else {}
@@ -137,6 +142,7 @@ def audit_phase2_readiness(
             and isinstance(item["returned_model_id"], str)
             and isinstance(item["returned_version_id"], str)
             and item["matches_preflight"]
+            and item["version_matches_preflight"]
             for item in identity_locks.values()
         )
     )

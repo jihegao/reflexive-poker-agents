@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +11,7 @@ from reflexive_poker.phase2_framework import (
     PHASE2_TREATMENTS,
     Phase2ExecutionError,
     Phase2OfflineRunConfig,
+    Phase2PowerAnalysisConfig,
     Phase2SixMaxRunConfig,
     ServingSystem,
     analyze_phase2_six_max,
@@ -18,6 +20,7 @@ from reflexive_poker.phase2_framework import (
     pareto_frontier,
     run_phase2_offline,
     systems_from_phase2,
+    write_phase2_power_analysis,
 )
 
 
@@ -84,6 +87,23 @@ def test_phase2_outcomes_stay_blocked_before_readiness_is_complete() -> None:
     readiness["ready_for_formal_outcomes"] = False
     with pytest.raises(Phase2ExecutionError, match="blocked"):
         assert_phase2_outcomes_ready(phase2, readiness)
+
+
+def test_power_analysis_is_pre_outcome_and_bound_to_phase1_lock(tmp_path: Path) -> None:
+    payload = write_phase2_power_analysis(
+        tmp_path / "power.json",
+        Phase2PowerAnalysisConfig(
+            phase1_outcome_lock="sha256:phase1-evidence",
+            paired_seed_count=80,
+            heads_up_hands=80,
+            expected_return_delta=1.2,
+            paired_seed_stddev=2.0,
+        ),
+    )
+    assert payload["valid"] is True
+    assert payload["analysis_unit"] == "paired_seed_block"
+    assert payload["phase1_outcome_lock"] == "sha256:phase1-evidence"
+    assert json.loads((tmp_path / "power.json").read_text()) == payload
 
 
 def test_four_system_offline_runner_requires_all_live_gates_and_marks_return_pending(

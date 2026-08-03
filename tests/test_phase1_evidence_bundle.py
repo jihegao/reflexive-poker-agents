@@ -4,7 +4,10 @@ import gzip
 import json
 from pathlib import Path
 
-from reflexive_poker.phase1_evidence_bundle import _artifact_provenance, audit_phase1_evidence_bundle
+from reflexive_poker.phase1_evidence_bundle import (
+    _artifact_provenance,
+    audit_phase1_evidence_bundle,
+)
 
 
 def _artifact(path: Path, *, valid: bool, predictions: int) -> None:
@@ -12,7 +15,9 @@ def _artifact(path: Path, *, valid: bool, predictions: int) -> None:
     (path / "provider_gate.json").write_text(
         json.dumps({"valid": valid, "attempt_audit": {"valid": True}}), encoding="utf-8"
     )
-    (path / "run.json").write_text(json.dumps({"run_id": path.name, "config_hash": "frozen"}), encoding="utf-8")
+    (path / "run.json").write_text(
+        json.dumps({"run_id": path.name, "config_hash": "frozen"}), encoding="utf-8"
+    )
     (path / "SOURCE_PROVENANCE.json").write_text(
         json.dumps(
             {
@@ -140,7 +145,9 @@ def test_evidence_audit_requires_every_paired_closed_loop_seed(tmp_path: Path) -
     assert complete["complete"]
     assert complete["claim_status"] == "ready_for_locked_analysis"
 
-    mixed_semantics = json.loads((paths["codex_offline"] / "SOURCE_PROVENANCE.json").read_text())
+    mixed_semantics = json.loads(
+        (paths["codex_offline"] / "SOURCE_PROVENANCE.json").read_text()
+    )
     mixed_semantics["protocol_semantics_fingerprint"] = "different-semantics"
     (paths["codex_offline"] / "SOURCE_PROVENANCE.json").write_text(
         json.dumps(mixed_semantics), encoding="utf-8"
@@ -163,10 +170,14 @@ def test_evidence_audit_rejects_duplicate_prediction_keys_with_matching_row_coun
 ) -> None:
     deepseek_preflight = tmp_path / "deepseek_preflight"
     _artifact(deepseek_preflight, valid=True, predictions=20)
-    with gzip.open(deepseek_preflight / "predictions.jsonl.gz", "rt", encoding="utf-8") as handle:
+    with gzip.open(
+        deepseek_preflight / "predictions.jsonl.gz", "rt", encoding="utf-8"
+    ) as handle:
         rows = [json.loads(line) for line in handle]
     rows[-1] = dict(rows[0])
-    with gzip.open(deepseek_preflight / "predictions.jsonl.gz", "wt", encoding="utf-8") as handle:
+    with gzip.open(
+        deepseek_preflight / "predictions.jsonl.gz", "wt", encoding="utf-8"
+    ) as handle:
         for row in rows:
             handle.write(json.dumps(row) + "\n")
     unavailable = tmp_path / "unavailable"
@@ -197,11 +208,11 @@ def test_evidence_audit_rejects_missing_or_mixed_price_snapshots(tmp_path: Path)
     (paths["closed"] / "CROSS_MODEL_PAIRED_BLOCK_STATUS.json").write_text(
         json.dumps({"target_seeds": 1, "valid_paired_blocks": 1}), encoding="utf-8"
     )
-    # Re-use the small complete artifacts for both 1,000-call requirements only
-    # to assert provenance failure before outcome coverage is considered.
     source = json.loads((paths["codex"] / "SOURCE_PROVENANCE.json").read_text())
     source["frozen_inputs"]["frozen_inputs/PRICE_MANIFEST.json"]["sha256"] = "different-price"
-    (paths["codex"] / "SOURCE_PROVENANCE.json").write_text(json.dumps(source), encoding="utf-8")
+    (paths["codex"] / "SOURCE_PROVENANCE.json").write_text(
+        json.dumps(source), encoding="utf-8"
+    )
     result = audit_phase1_evidence_bundle(
         tmp_path / "audit",
         deepseek_preflight=paths["deepseek"],

@@ -147,6 +147,7 @@ def test_offline_mock_smoke_writes_raw_and_scored_artifacts(tmp_path: Path) -> N
     assert (tmp_path / "cases.jsonl.gz").exists()
     assert (tmp_path / "predictions.jsonl.gz").exists()
     assert (tmp_path / "scores_per_case.csv").exists()
+    assert {"checkpoint_index", "hand_index"}.issubset(result["scores_per_case"].columns)
     assert (tmp_path / "offline_trajectory_deltas.csv").exists()
     assert (tmp_path / "type_calibration_summary.csv").exists()
     assert (tmp_path / "type_calibration_reliability.csv").exists()

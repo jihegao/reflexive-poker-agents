@@ -46,6 +46,7 @@ from reflexive_poker.phase1_statistics import (
     inference_table,
     large_pot_sensitivity,
     paired_bootstrap_interval,
+    paired_large_pot_sensitivity,
 )
 
 
@@ -393,6 +394,17 @@ def test_rule_phase1_smoke_writes_auditable_artifacts(tmp_path: Path) -> None:
     assert (tmp_path / "manifest.json").exists()
     assert (tmp_path / "mechanism_metrics.csv").exists()
     assert (tmp_path / "paired_hand_deltas.csv").exists()
+    assert {
+        "paired_large_pot_hand_index",
+        "paired_trimmed_chips_per_100_delta",
+        "leave_largest_pot_out_chips_per_100_delta",
+    }.issubset(result["paired"].columns)
+    assert {
+        "decision_regret_reduction",
+        "chips_per_100_delta",
+        "trimmed_delta",
+        "leave_largest_pot_out_chips_per_100_delta",
+    }.issubset(set(result["inference"]["metric"]))
     assert (tmp_path / "depth_payoff.png").exists()
     assert json.loads((tmp_path / "manifest.json").read_text())["evidence_class"] == (
         "exploratory_or_smoke"
@@ -481,6 +493,27 @@ def test_statistics_cover_pairing_holm_and_large_pots() -> None:
     sensitivity = large_pot_sensitivity(pd.DataFrame({"reward": [1.0, 2.0, 100.0]}))
     assert sensitivity["largest_abs_reward"] == 100.0
     assert sensitivity["trimmed_1pct_reward"] == 3.0
+
+
+def test_paired_large_pot_sensitivity_removes_the_same_pot_from_both_arms() -> None:
+    paired_hands = pd.DataFrame(
+        {
+            "seed": [1, 1, 1],
+            "contrast": ["d2-d1"] * 3,
+            "hand_index": [0, 1, 2],
+            "reward_lower": [1.0, -4.0, 20.0],
+            "reward_upper": [2.0, 4.0, -20.0],
+            "reward_delta": [1.0, 8.0, -40.0],
+            # Hand 1 is the largest pot even though hand 2 has the largest
+            # reward delta. Selection must follow pot magnitude, once, for both arms.
+            "largest_pot_before_action_lower": [3.0, 99.0, 10.0],
+            "largest_pot_before_action_upper": [3.0, 99.0, 10.0],
+        }
+    )
+    result = paired_large_pot_sensitivity(paired_hands).iloc[0]
+    assert result["paired_large_pot_hand_index"] == 1
+    assert result["paired_trimmed_chips_per_100_delta"] == pytest.approx(-1950.0)
+    assert result["leave_largest_pot_out_chips_per_100_delta"] == pytest.approx(-1950.0)
 
 
 def test_core_hypothesis_classifier_requires_two_valid_models() -> None:

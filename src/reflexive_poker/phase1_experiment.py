@@ -33,7 +33,11 @@ from .phase1_models import (
     Stability,
 )
 from .phase1_protocol import canonical_checkpoint_id, mirror_assignment
-from .phase1_statistics import inference_table, large_pot_sensitivity
+from .phase1_statistics import (
+    inference_table,
+    large_pot_sensitivity,
+    paired_large_pot_sensitivity,
+)
 
 DEFAULT_TREATMENTS = tuple(ReasoningTreatment)
 DEPTH_TREATMENTS = (
@@ -721,12 +725,32 @@ def _paired_hand_deltas(
                     "reward_lower",
                     "reward_upper",
                     "reward_delta",
+                    "largest_pot_before_action_lower",
+                    "largest_pot_before_action_upper",
                     "cumulative_delta",
                     "rolling_25_delta",
                 ]
             ]
         )
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def _attach_paired_large_pot_sensitivity(
+    paired: pd.DataFrame, paired_hands: pd.DataFrame
+) -> pd.DataFrame:
+    """Attach paired trim and leave-largest-pot-out results to seed deltas."""
+    if paired.empty:
+        return paired
+    sensitivity = paired_large_pot_sensitivity(paired_hands)
+    if sensitivity.empty:
+        return paired
+    result = paired.merge(sensitivity, on=["seed", "contrast"], how="left", validate="one_to_one")
+    # Preserve the older arm-wise quantity for exploratory backward
+    # compatibility, but make the unqualified trim column the valid paired one
+    # used by the formal classifier/report.
+    result["armwise_trimmed_delta"] = result["trimmed_delta"]
+    result["trimmed_delta"] = result["paired_trimmed_chips_per_100_delta"]
+    return result
 
 
 def _cost_metrics(per_hand: pd.DataFrame, traces: list[dict[str, Any]]) -> pd.DataFrame:
@@ -970,7 +994,7 @@ def _report(
         "",
         "## 配对闭环推断",
         "",
-        "| 指标 | 对比 | 配对种子 | 均值差 | 95% CI | 正向种子率 | Holm p | 去最大种子后 |",
+        "| 指标 | 对比 | 配对种子 | 均值差 | 95% CI | 正向种子率 | Holm p | 去最大收益差 seed 后 |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for row in inference.to_dict(orient="records"):
@@ -988,7 +1012,7 @@ def _report(
             "",
             "## 解释边界",
             "",
-            f"- 所有已配对结果去除每个条件绝对收益最高 1% 手牌后仍同向：`{trimmed_consistent}`。",
+            f"- 所有已配对结果按同一 large-pot 手共同去除 top 1% 后仍同向：`{trimmed_consistent}`。",
             "- `strong_support` 不能由 smoke、单种子、provider gate 失败或未预注册运行产生。",
             "- 两个真实模型的正式结果必须分别完成后，才能判断跨模型方向一致性。",
         ]
@@ -1116,8 +1140,10 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
     if "decision_regret" not in per_hand:
         per_hand["decision_regret"] = float("nan")
     per_seed = _per_seed(per_hand, config)
-    paired = _paired(per_seed, config.treatments)
     paired_hands = _paired_hand_deltas(per_hand, config.treatments)
+    paired = _attach_paired_large_pot_sensitivity(
+        _paired(per_seed, config.treatments), paired_hands
+    )
     # Regret is the preregistered primary closed-loop outcome; return remains
     # secondary and must not silently stand in for it. Holm correction is
     # applied within each metric family.
@@ -1132,6 +1158,18 @@ def run_phase1_experiment(config: Phase1ExperimentConfig) -> dict[str, Any]:
             inference_table(
                 paired,
                 metric="chips_per_100_delta",
+                bootstrap_samples=config.bootstrap_samples,
+                permutation_samples=config.permutation_samples,
+            ),
+            inference_table(
+                paired,
+                metric="trimmed_delta",
+                bootstrap_samples=config.bootstrap_samples,
+                permutation_samples=config.permutation_samples,
+            ),
+            inference_table(
+                paired,
+                metric="leave_largest_pot_out_chips_per_100_delta",
                 bootstrap_samples=config.bootstrap_samples,
                 permutation_samples=config.permutation_samples,
             ),

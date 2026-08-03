@@ -17,6 +17,7 @@ from .phase1_experiment import (
     ConfirmationJob,
     Phase1ExperimentConfig,
     Phase1LLMConfirmationPlan,
+    _attach_paired_large_pot_sensitivity,
     _jsonable,
     _paired,
     _paired_hand_deltas,
@@ -255,8 +256,8 @@ def _aggregate_seed_blocks(
 ) -> dict[str, int]:
     per_hand = pd.concat([pd.read_csv(path / "per_hand.csv") for path in block_dirs])
     per_seed = pd.concat([pd.read_csv(path / "per_seed.csv") for path in block_dirs])
-    paired = _paired(per_seed, treatments)
     paired_hands = _paired_hand_deltas(per_hand, treatments)
+    paired = _attach_paired_large_pot_sensitivity(_paired(per_seed, treatments), paired_hands)
     inference = pd.concat(
         [
             inference_table(
@@ -268,6 +269,18 @@ def _aggregate_seed_blocks(
             inference_table(
                 paired,
                 metric="chips_per_100_delta",
+                bootstrap_samples=bootstrap_samples,
+                permutation_samples=permutation_samples,
+            ),
+            inference_table(
+                paired,
+                metric="trimmed_delta",
+                bootstrap_samples=bootstrap_samples,
+                permutation_samples=permutation_samples,
+            ),
+            inference_table(
+                paired,
+                metric="leave_largest_pot_out_chips_per_100_delta",
                 bootstrap_samples=bootstrap_samples,
                 permutation_samples=permutation_samples,
             ),

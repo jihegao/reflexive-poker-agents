@@ -825,6 +825,8 @@ def score_predictions(
             {
                 "case_id": case["case_id"],
                 "trajectory_id": case["trajectory_id"],
+                "checkpoint_index": case["checkpoint_index"],
+                "hand_index": case["hand_index"],
                 "regime": case["regime"],
                 "post_switch": case["post_switch"],
                 "method": prediction["method"],

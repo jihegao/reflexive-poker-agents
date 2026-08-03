@@ -27,16 +27,16 @@ evidence_layers:
         model: deepseek-v4-flash
       - provider: codex
         model: gpt-5.6-luna
-    max_calls_per_model: 10000
+    max_calls_per_model: 38000
     offline_understanding_calls: 1600
-    heads_up_contrast_calls: 8000
+    heads_up_contrast_calls: 36000
     six_max_external_validation_calls: 0
     preflight_and_retry_reserve: 400
 paper_phase1:
   claim_boundary: opponent_state_estimation_and_counterfactual_decision_quality
   pricing_manifest:
-    path: pricing/phase1-2026-08-02.json
-    sha256: 506a0e46d3483c7e0cba89dd45481ae37f968e5bc9b498b799a564b938b42d47
+    path: pricing/phase1-2026-08-03.json
+    sha256: da9c708135d10940236f476eac4603c347244afabee4173f4ef653fae41ea6a1
   case_count: 200
   preflight_cases: 4
   base_seed: 20260802
@@ -54,12 +54,12 @@ paper_phase1:
     treatments: [state_only, d1_budget_matched, recursive_d2]
     regimes: [fixed, adaptive]
     opponent_type: tag
-    seed_start: 9700
-    seed_count: 40
+    seed_start: 9800
+    seed_count: 30
     hands: 20
     formation_hands: 5
     equity_samples: 8
-    max_primary_calls_per_paired_block: 100
+    max_primary_calls_per_paired_block: 600
   execution_isolation:
     registry_root: results/experiments
     background_process: true

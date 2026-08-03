@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "protocol": "prbench-cross-model-v1",
+  "manifest_id": "prbench-phase1-pricing-2026-08-03-v1",
+  "frozen": true,
+  "frozen_at_utc": "2026-08-03T01:44:24Z",
+  "currency": "USD",
+  "entries": [
+    {
+      "serving_system": "opencode-go/deepseek-v4-flash",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "cost_observability": "exact",
+      "observed_billed_cost_policy": "retain_provider_returned_cost",
+      "rates_usd_per_million": {
+        "input_cache_hit": 0.0028,
+        "input_cache_miss": 0.14,
+        "output": 0.28,
+        "reasoning": 0.28,
+        "cache_read": 0.0028,
+        "cache_write": 0.14
+      },
+      "sources": [
+        {
+          "url": "https://api-docs.deepseek.com/quick_start/pricing",
+          "retrieved_at_utc": "2026-08-03T01:44:24Z",
+          "note": "Official DeepSeek Models & Pricing page; provider-returned billed cost remains authoritative for this serving stack."
+        }
+      ]
+    },
+    {
+      "serving_system": "codex/gpt-5.6-luna",
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "cost_observability": "unavailable",
+      "unavailable_reason": "The authenticated Codex CLI emits token usage but no per-call billed cost or public API-equivalent price for this serving-system selector.",
+      "observed_billed_cost_policy": "never_substitute_zero",
+      "rates_usd_per_million": null,
+      "sources": [
+        {
+          "url": "local:codex-cli-json-stream",
+          "retrieved_at_utc": "2026-08-03T01:44:24Z",
+          "note": "Runtime capability check: the selected Codex CLI stream has no billed-cost field; unavailable is recorded explicitly."
+        }
+      ]
+    }
+  ]
+}

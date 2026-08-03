@@ -279,14 +279,14 @@ post_formation_chips_per_100
 主矩阵为：
 
 ```text
-2 serving systems × 3 treatments × 2 regimes × 40 paired seeds
+2 serving systems × 3 treatments × 2 regimes × 30 paired seeds
 ```
 
-若冻结的调用率估计表明 40 seeds 超出预算，可以在查看任何正式 outcome 前统一降到 30；低于 30 不作为论文正式确认。每个 block 使用共享 formation checkpoint、相同牌序、对手随机流、切换状态和座位镜像。一个 arm 失败则整个 paired block 退出主分析。
+在旧版 40-seed/100-call 配置被发现无法覆盖一个完整 paired block 后，本次重新冻结采用 30 seeds（仍为论文正式确认的最低样本量）。每个 block 使用共享 formation checkpoint、相同牌序、对手随机流、切换状态和座位镜像。一个 arm 失败则整个 paired block 退出主分析。
 
 闭环主指标是 counterfactual decision regret；`post_formation_chips_per_100` 为重要次要指标。只有收益 CI、座位镜像、top-1% trim 和 leave-largest-pot-out 全部同向时，才允许写“improves return”。否则结论限定为 opponent-state estimation 和 decision quality。
 
-每模型总上限保持 10,000 calls：1,600 留给离线理解与重复，8,000 留给 fixed/adaptive Heads-up，400 留给预检与 schema repair。运行中不得依据中间收益提前停止或重新分配条件预算。
+重新冻结后的每模型总上限为 38,000 calls：1,600 留给离线理解与重复，36,000 留给 fixed/adaptive Heads-up，400 留给预检与 schema repair。20 手/5 手 formation 的理论 paired-block 主调用上界为 600，因此每个 regime job 的 18,000 主调用正好覆盖 30 个 seeds。运行中不得依据中间收益提前停止或重新分配条件预算。
 
 ### Phase 1.4：锁定分析与论文证据包
 

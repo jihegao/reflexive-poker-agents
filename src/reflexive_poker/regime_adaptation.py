@@ -24,9 +24,9 @@ from .regime_experiment import (
 from .regime_simulation import SimulationResult, WorldSimulator
 
 __all__ = [
-    "AdaptationState",
     "DEFAULT_WORLD",
     "HYPOTHESIS_SCHEMA",
+    "AdaptationState",
     "HeuristicHypothesisGenerator",
     "HypothesisGenerator",
     "OpponentWorld",

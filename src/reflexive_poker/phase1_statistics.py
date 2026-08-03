@@ -163,6 +163,88 @@ def large_pot_sensitivity(per_hand: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def paired_large_pot_sensitivity(paired_hands: pd.DataFrame) -> pd.DataFrame:
+    """Calculate return robustness without breaking a paired hand comparison.
+
+    Large pots are selected once per ``seed``/``contrast`` using the largest
+    pot observed in either arm.  The same hand is then removed from both arms;
+    independently trimming each arm would turn a paired sensitivity analysis
+    into two different estimands.  ``reward`` remains the outcome while
+    ``largest_pot_before_action`` is only the pre-registered selection rule.
+    """
+    output_columns = [
+        "seed",
+        "contrast",
+        "paired_large_pot_hand_index",
+        "paired_large_pot_magnitude",
+        "paired_top_1pct_abs_delta_share",
+        "paired_trimmed_chips_per_100_delta",
+        "leave_largest_pot_out_chips_per_100_delta",
+    ]
+    if paired_hands.empty:
+        return pd.DataFrame(columns=output_columns)
+    required = {
+        "seed",
+        "contrast",
+        "hand_index",
+        "reward_lower",
+        "reward_upper",
+        "reward_delta",
+    }
+    missing = required.difference(paired_hands.columns)
+    if missing:
+        raise ValueError(f"paired hands missing required columns: {sorted(missing)}")
+    rows: list[dict[str, float | int | str]] = []
+    for (seed, contrast), group in paired_hands.groupby(["seed", "contrast"], sort=False):
+        ordered = group.sort_values("hand_index", kind="stable").copy()
+        arm_magnitude = np.maximum(
+            ordered["reward_lower"].abs().to_numpy(dtype=float),
+            ordered["reward_upper"].abs().to_numpy(dtype=float),
+        )
+        if {
+            "largest_pot_before_action_lower",
+            "largest_pot_before_action_upper",
+        }.issubset(ordered.columns):
+            pot_magnitude = np.maximum(
+                ordered["largest_pot_before_action_lower"].to_numpy(dtype=float),
+                ordered["largest_pot_before_action_upper"].to_numpy(dtype=float),
+            )
+        else:
+            # Legacy hand-delta files did not retain pot size.  They remain
+            # readable, but their selection rule is explicitly reward-based.
+            pot_magnitude = arm_magnitude
+        deltas = ordered["reward_delta"].to_numpy(dtype=float)
+        hand_count = len(ordered)
+        trim_count = max(1, math.ceil(hand_count * 0.01))
+        removal = np.argsort(pot_magnitude, kind="stable")[-trim_count:]
+        keep = np.ones(hand_count, dtype=bool)
+        keep[removal] = False
+        largest_index = int(np.argmax(pot_magnitude))
+        leave_one = keep.copy()
+        leave_one[largest_index] = False
+        absolute_delta = np.abs(deltas)
+        rows.append(
+            {
+                "seed": int(seed),
+                "contrast": str(contrast),
+                "paired_large_pot_hand_index": int(ordered.iloc[largest_index]["hand_index"]),
+                "paired_large_pot_magnitude": float(pot_magnitude[largest_index]),
+                "paired_top_1pct_abs_delta_share": (
+                    float(absolute_delta[removal].sum() / absolute_delta.sum())
+                    if absolute_delta.sum()
+                    else 0.0
+                ),
+                "paired_trimmed_chips_per_100_delta": 100.0
+                * float(deltas[keep].sum())
+                / max(1, int(keep.sum())),
+                "leave_largest_pot_out_chips_per_100_delta": 100.0
+                * float(deltas[leave_one].sum())
+                / max(1, int(leave_one.sum())),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def rolling_direction_consistency(per_hand_deltas: pd.DataFrame, window: int = 25) -> float:
     if per_hand_deltas.empty:
         return float("nan")

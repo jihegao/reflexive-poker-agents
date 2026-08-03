@@ -35,7 +35,8 @@ def _scores() -> pd.DataFrame:
                             "trajectory_id": f"{regime}-{trajectory}",
                             "case_id": f"case-{case}",
                             "regime": regime,
-                            "post_switch": True,
+                            "post_switch": regime == "adaptive_shift",
+                            "checkpoint_index": case + 2,
                             "treatment": "d1_budget_matched",
                             "action_brier": baseline,
                         },
@@ -43,7 +44,8 @@ def _scores() -> pd.DataFrame:
                             "trajectory_id": f"{regime}-{trajectory}",
                             "case_id": f"case-{case}",
                             "regime": regime,
-                            "post_switch": True,
+                            "post_switch": regime == "adaptive_shift",
+                            "checkpoint_index": case + 2,
                             "treatment": "recursive_d2",
                             "action_brier": baseline + delta,
                         },
@@ -113,6 +115,7 @@ def test_post_switch_contrasts_include_fixed_interaction_and_holm() -> None:
     assert result.loc[1, "estimate"] == pytest.approx(-0.05)
     assert result.loc[2, "estimate"] == pytest.approx(-0.25)
     assert result["inference_unit"].eq("trajectory").all()
+    assert result.loc[1, "analysis_window"] == "matched_post_switch_checkpoints"
     assert result["holm_p"].between(0.0, 1.0).all()
 
 

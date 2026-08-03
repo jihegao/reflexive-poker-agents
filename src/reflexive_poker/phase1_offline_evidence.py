@@ -320,12 +320,38 @@ def d2_d1bm_post_switch_contrasts(
         raise ValueError(f"scores missing required columns: {sorted(missing)}")
     if bootstrap_samples < 1 or permutation_samples < 1:
         raise ValueError("bootstrap_samples and permutation_samples must be positive")
-    post_switch = scores.loc[scores[post_switch_col].astype(bool)].copy()
+    dynamic_rows = scores.loc[
+        (scores[regime_col] == dynamic_regime) & scores[post_switch_col].astype(bool)
+    ].copy()
+    if dynamic_rows.empty:
+        raise ValueError(f"no post-switch rows for dynamic regime: {dynamic_regime}")
+    # A fixed trajectory has no *actual* switch, so ``post_switch`` is always
+    # false.  Its valid control window is the same frozen checkpoint positions
+    # as the dynamic arm's post-switch observations, not an empty filter.
+    if "checkpoint_index" in scores.columns:
+        control_checkpoints = set(dynamic_rows["checkpoint_index"])
+        fixed_rows = scores.loc[
+            (scores[regime_col] == fixed_regime)
+            & scores["checkpoint_index"].isin(control_checkpoints)
+        ].copy()
+    elif "hand_index" in scores.columns:
+        first_post_switch_hand = float(dynamic_rows["hand_index"].min())
+        fixed_rows = scores.loc[
+            (scores[regime_col] == fixed_regime)
+            & (pd.to_numeric(scores["hand_index"], errors="raise") >= first_post_switch_hand)
+        ].copy()
+    else:
+        raise ValueError(
+            "scores need checkpoint_index or hand_index to match the fixed control window"
+        )
     by_regime: dict[str, pd.DataFrame] = {}
     rows: list[dict[str, Any]] = []
-    for regime in (dynamic_regime, fixed_regime):
+    for regime, analysis_rows, window in (
+        (dynamic_regime, dynamic_rows, "observed_post_switch"),
+        (fixed_regime, fixed_rows, "matched_post_switch_checkpoints"),
+    ):
         deltas = paired_trajectory_deltas(
-            post_switch.loc[post_switch[regime_col] == regime],
+            analysis_rows,
             metric=metric,
             treatment_a=d2_treatment,
             treatment_b=d1bm_treatment,
@@ -349,6 +375,7 @@ def d2_d1bm_post_switch_contrasts(
                 "trajectories": boot.clusters,
                 "paired_observations": permutation.paired_observations,
                 "inference_unit": "trajectory",
+                "analysis_window": window,
             }
         )
     dynamic = by_regime[dynamic_regime]["delta"].to_numpy(dtype=float)
@@ -374,6 +401,7 @@ def d2_d1bm_post_switch_contrasts(
                 + by_regime[fixed_regime]["paired_observations"].sum()
             ),
             "inference_unit": "trajectory",
+            "analysis_window": "adaptive_minus_fixed_matched_post_switch_checkpoints",
         }
     )
     result = pd.DataFrame(rows)
@@ -428,10 +456,35 @@ def offline_trajectory_inference(
             contrast.insert(0, "provider", provider)
             inference_parts.append(contrast)
             for regime in ("adaptive_shift", "fixed"):
+                if regime == "adaptive_shift":
+                    analysis_rows = group.loc[
+                        (group["regime"] == regime) & group["post_switch"].astype(bool)
+                    ]
+                elif "checkpoint_index" in group.columns:
+                    dynamic_checkpoints = set(
+                        group.loc[
+                            (group["regime"] == "adaptive_shift")
+                            & group["post_switch"].astype(bool),
+                            "checkpoint_index",
+                        ]
+                    )
+                    analysis_rows = group.loc[
+                        (group["regime"] == regime)
+                        & group["checkpoint_index"].isin(dynamic_checkpoints)
+                    ]
+                else:
+                    first_post_switch_hand = float(
+                        group.loc[
+                            (group["regime"] == "adaptive_shift")
+                            & group["post_switch"].astype(bool),
+                            "hand_index",
+                        ].min()
+                    )
+                    analysis_rows = group.loc[
+                        (group["regime"] == regime) & (group["hand_index"] >= first_post_switch_hand)
+                    ]
                 deltas = paired_trajectory_deltas(
-                    group.loc[
-                        group["post_switch"].astype(bool) & (group["regime"] == regime)
-                    ],
+                    analysis_rows,
                     metric=metric,
                     treatment_a="recursive_d2",
                     treatment_b="d1_budget_matched",

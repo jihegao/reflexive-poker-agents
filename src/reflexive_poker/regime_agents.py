@@ -35,7 +35,7 @@ class AdaptationState:
 
 
 class ReflectionTrackerAgent(PokerAgent):
-    """Reflection-only control with recency-weighted unconditional frequencies."""
+    """Reflection-only control using recency-weighted conditional frequencies."""
 
     condition = "reflection_tracker"
 
@@ -44,6 +44,7 @@ class ReflectionTrackerAgent(PokerAgent):
         self.action_counts: Counter[ActionType] = Counter(
             {action: 1.0 for action in _ACTIONS}
         )
+        self.conditional_observations: deque[OpponentObservation] = deque(maxlen=48)
 
     def observe_action(self, event: ActionEvent) -> None:
         super().observe_action(event)
@@ -52,6 +53,7 @@ class ReflectionTrackerAgent(PokerAgent):
         for action in _ACTIONS:
             self.action_counts[action] *= 0.985
         self.action_counts[event.action] += 1.0
+        self.conditional_observations.append(OpponentObservation.from_event(event))
 
     @property
     def estimated_raise_probability(self) -> float:
@@ -60,15 +62,56 @@ class ReflectionTrackerAgent(PokerAgent):
     def act(self, context: DecisionContext) -> Decision:
         raise_probability = self.estimated_raise_probability
         shift = 0.10 if raise_probability < 0.13 else (-0.03 if raise_probability > 0.34 else 0.0)
+        world = empirical_world(
+            tuple(self.conditional_observations),
+            name="reflection_recent",
+            prior=1.0,
+        )
+        response_policy = "frequency_adjustment"
+        if (
+            len(self.conditional_observations) >= 24
+            and world.open_raise_probability >= 0.30
+            and world.fold_vs_bet_probability >= 0.55
+            and world.reraise_probability <= 0.20
+        ):
+            response_policy = "pressure"
+        elif (
+            len(self.conditional_observations) >= 24
+            and world.open_raise_probability >= 0.30
+            and world.fold_vs_bet_probability <= 0.30
+            and world.reraise_probability >= 0.25
+        ):
+            response_policy = "bluff_catch"
+        metadata = {
+            "adaptation_condition": self.condition,
+            "estimated_raise_probability": raise_probability,
+            "estimated_open_raise_probability": world.open_raise_probability,
+            "estimated_fold_vs_bet_probability": world.fold_vs_bet_probability,
+            "estimated_reraise_probability": world.reraise_probability,
+            "response_policy": response_policy,
+        }
+        if response_policy in {"pressure", "bluff_catch"}:
+            decision = response_policy_decision(
+                self,
+                context,
+                response_policy,
+                metadata=metadata,
+            )
+            self.decision_log.append(
+                {
+                    "hand_index": context.hand_index,
+                    "street": context.street.value,
+                    "action": decision.action.value,
+                    "equity": decision.equity,
+                    **metadata,
+                }
+            )
+            return decision
         return self._policy(
             context,
             aggression_shift=shift,
             reasoning_depth=1,
-            metadata={
-                "adaptation_condition": self.condition,
-                "estimated_raise_probability": raise_probability,
-                "response_policy": "frequency_adjustment",
-            },
+            metadata=metadata,
         )
 
 

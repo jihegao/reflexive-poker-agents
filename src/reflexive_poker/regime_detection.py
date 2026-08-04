@@ -80,6 +80,393 @@ class SurpriseUpdate:
     observations: int
 
 
+@dataclass(frozen=True)
+class ConditionalDriftUpdate:
+    """Result from a two-sample conditional action-distribution comparison."""
+
+    likelihood_ratio: float
+    max_probability_delta: float
+    change_detected: bool
+    observations: int
+    context_likelihood_ratios: dict[str, float]
+    probability_deltas: dict[str, float]
+
+
+@dataclass(frozen=True)
+class SignedEProcessUpdate:
+    """One update from the blockwise signed conditional Bayes-factor process."""
+
+    block_complete: bool
+    block_index: int
+    e_value_up: float
+    e_value_down: float
+    log_bayes_factor_up: float
+    log_bayes_factor_down: float
+    direction: str | None
+    change_detected: bool
+    observations: int
+    probability_deltas: dict[str, float]
+    metric_counts: dict[str, dict[str, int]]
+
+
+def _log_add_exp(left: float, right: float) -> float:
+    anchor = max(left, right)
+    if math.isinf(anchor):
+        return anchor
+    return anchor + math.log(math.exp(left - anchor) + math.exp(right - anchor))
+
+
+class SignedConditionalEProcessDetector:
+    """Blockwise signed Bayes-factor process for conditional Bernoulli shifts.
+
+    Separate upward and downward processes track opening raises and folds while
+    facing a bet. A uniform mixture over possible block-aligned change starts
+    prevents repeated peeking from being treated as independent tests. The
+    detector is calibrated empirically on held-out no-switch traces before it
+    is used for validation; it is not claimed as a theorem-level universal
+    anytime-valid test when the reference distribution is estimated.
+    """
+
+    _METRICS = ("open_raise", "fold_vs_bet")
+
+    def __init__(
+        self,
+        *,
+        reference_size: int = 96,
+        block_size: int = 16,
+        e_value_threshold: float = 10.0,
+        alternative_delta: float = 0.18,
+        alternative_concentration: float = 32.0,
+        minimum_direction_delta: float = 0.06,
+        maximum_blocks: int = 64,
+        smoothing: float = 1.0,
+    ) -> None:
+        if reference_size < 16 or block_size < 4:
+            raise ValueError("reference_size and block_size are too small")
+        if e_value_threshold <= 1.0:
+            raise ValueError("e_value_threshold must exceed one")
+        if not 0.0 < alternative_delta < 1.0:
+            raise ValueError("alternative_delta must be in (0, 1)")
+        if alternative_concentration <= 0.0 or smoothing <= 0.0:
+            raise ValueError("concentration and smoothing must be positive")
+        if not 0.0 <= minimum_direction_delta < 1.0:
+            raise ValueError("minimum_direction_delta must be in [0, 1)")
+        if maximum_blocks < 2:
+            raise ValueError("maximum_blocks must be at least two")
+        self.reference_size = reference_size
+        self.block_size = block_size
+        self.e_value_threshold = e_value_threshold
+        self.alternative_delta = alternative_delta
+        self.alternative_concentration = alternative_concentration
+        self.minimum_direction_delta = minimum_direction_delta
+        self.maximum_blocks = maximum_blocks
+        self.smoothing = smoothing
+        self.reference: tuple[OpponentObservation, ...] = ()
+        self.block: list[OpponentObservation] = []
+        self.block_index = 0
+        self._log_restart_up = -math.inf
+        self._log_restart_down = -math.inf
+        self.e_value_up = 1.0
+        self.e_value_down = 1.0
+
+    @property
+    def ready(self) -> bool:
+        return len(self.reference) >= self.reference_size
+
+    def fit_reference(self, observations: Sequence[OpponentObservation]) -> None:
+        if len(observations) < self.reference_size:
+            raise ValueError("Not enough observations to fit e-process reference")
+        self.reference = tuple(observations[-self.reference_size :])
+        self.block.clear()
+        self.block_index = 0
+        self._log_restart_up = -math.inf
+        self._log_restart_down = -math.inf
+        self.e_value_up = 1.0
+        self.e_value_down = 1.0
+
+    @staticmethod
+    def _metric_outcomes(
+        observations: Sequence[OpponentObservation],
+        metric: str,
+    ) -> tuple[int, int]:
+        if metric == "open_raise":
+            eligible = [item for item in observations if not item.facing_bet]
+            successes = sum(item.action is ActionType.RAISE for item in eligible)
+        elif metric == "fold_vs_bet":
+            eligible = [item for item in observations if item.facing_bet]
+            successes = sum(item.action is ActionType.FOLD for item in eligible)
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+        return successes, len(eligible) - successes
+
+    @staticmethod
+    def _log_beta(alpha: float, beta: float) -> float:
+        return math.lgamma(alpha) + math.lgamma(beta) - math.lgamma(alpha + beta)
+
+    def _metric_log_bayes_factor(
+        self,
+        metric: str,
+        successes: int,
+        failures: int,
+        direction: int,
+    ) -> float:
+        reference_successes, reference_failures = self._metric_outcomes(
+            self.reference,
+            metric,
+        )
+        null_alpha = reference_successes + self.smoothing
+        null_beta = reference_failures + self.smoothing
+        reference_mean = null_alpha / (null_alpha + null_beta)
+        alternative_mean = min(
+            max(reference_mean + direction * self.alternative_delta, 0.01),
+            0.99,
+        )
+        alternative_alpha = alternative_mean * self.alternative_concentration
+        alternative_beta = (1.0 - alternative_mean) * self.alternative_concentration
+        log_null = self._log_beta(
+            null_alpha + successes,
+            null_beta + failures,
+        ) - self._log_beta(null_alpha, null_beta)
+        log_alternative = self._log_beta(
+            alternative_alpha + successes,
+            alternative_beta + failures,
+        ) - self._log_beta(alternative_alpha, alternative_beta)
+        return log_alternative - log_null
+
+    def _mixture_e_value(self, log_restart: float) -> float:
+        remaining = max(self.maximum_blocks - self.block_index, 0)
+        log_remaining = math.log(remaining) if remaining else -math.inf
+        log_mixture = _log_add_exp(log_remaining, log_restart) - math.log(
+            self.maximum_blocks
+        )
+        return math.exp(min(log_mixture, 700.0))
+
+    def update(self, observation: OpponentObservation) -> SignedEProcessUpdate:
+        if not self.ready:
+            raise RuntimeError("fit_reference must be called before update")
+        self.block.append(observation)
+        if len(self.block) < self.block_size:
+            return SignedEProcessUpdate(
+                block_complete=False,
+                block_index=self.block_index,
+                e_value_up=self.e_value_up,
+                e_value_down=self.e_value_down,
+                log_bayes_factor_up=0.0,
+                log_bayes_factor_down=0.0,
+                direction=None,
+                change_detected=False,
+                observations=len(self.block),
+                probability_deltas={},
+                metric_counts={},
+            )
+
+        self.block_index += 1
+        metric_counts: dict[str, dict[str, int]] = {}
+        probability_deltas: dict[str, float] = {}
+        log_bayes_factors = {1: 0.0, -1: 0.0}
+        for metric in self._METRICS:
+            successes, failures = self._metric_outcomes(self.block, metric)
+            reference_successes, reference_failures = self._metric_outcomes(
+                self.reference,
+                metric,
+            )
+            recent_probability = (successes + self.smoothing) / (
+                successes + failures + 2.0 * self.smoothing
+            )
+            reference_probability = (reference_successes + self.smoothing) / (
+                reference_successes + reference_failures + 2.0 * self.smoothing
+            )
+            probability_deltas[metric] = recent_probability - reference_probability
+            metric_counts[metric] = {
+                "successes": successes,
+                "failures": failures,
+            }
+            if successes + failures:
+                for direction in (1, -1):
+                    log_bayes_factors[direction] += self._metric_log_bayes_factor(
+                        metric,
+                        successes,
+                        failures,
+                        direction,
+                    )
+
+        self._log_restart_up = log_bayes_factors[1] + _log_add_exp(
+            0.0,
+            self._log_restart_up,
+        )
+        self._log_restart_down = log_bayes_factors[-1] + _log_add_exp(
+            0.0,
+            self._log_restart_down,
+        )
+        self.e_value_up = self._mixture_e_value(self._log_restart_up)
+        self.e_value_down = self._mixture_e_value(self._log_restart_down)
+        upward_signature = all(
+            probability_deltas.get(metric, 0.0) >= self.minimum_direction_delta
+            for metric in self._METRICS
+        )
+        downward_signature = all(
+            probability_deltas.get(metric, 0.0) <= -self.minimum_direction_delta
+            for metric in self._METRICS
+        )
+        direction = None
+        if self.e_value_up >= self.e_value_threshold and upward_signature:
+            direction = "up"
+        elif self.e_value_down >= self.e_value_threshold and downward_signature:
+            direction = "down"
+        self.block.clear()
+        return SignedEProcessUpdate(
+            block_complete=True,
+            block_index=self.block_index,
+            e_value_up=self.e_value_up,
+            e_value_down=self.e_value_down,
+            log_bayes_factor_up=log_bayes_factors[1],
+            log_bayes_factor_down=log_bayes_factors[-1],
+            direction=direction,
+            change_detected=direction is not None,
+            observations=self.block_size,
+            probability_deltas=probability_deltas,
+            metric_counts=metric_counts,
+        )
+
+
+class ConditionalDistributionDetector:
+    """Detect two-sided changes in context-conditional opponent actions.
+
+    A frozen formation sample is compared with a rolling recent sample using a
+    smoothed conditional multinomial likelihood ratio. Unlike surprise-only
+    detection, this test responds when an already-likely action becomes still
+    more frequent, as happens when fold-versus-bet increases.
+    """
+
+    def __init__(
+        self,
+        *,
+        reference_size: int = 64,
+        recent_size: int = 40,
+        min_recent_observations: int = 28,
+        likelihood_ratio_threshold: float = 6.0,
+        min_probability_delta: float = 0.12,
+        required_streak: int = 2,
+        evaluation_stride: int = 4,
+        calibration_observations: int = 0,
+        smoothing: float = 1.0,
+    ) -> None:
+        if reference_size < 8:
+            raise ValueError("reference_size must be at least eight")
+        if recent_size < 4:
+            raise ValueError("recent_size must be at least four")
+        if not 1 <= min_recent_observations <= recent_size:
+            raise ValueError("min_recent_observations must be within recent_size")
+        if likelihood_ratio_threshold <= 0.0:
+            raise ValueError("likelihood_ratio_threshold must be positive")
+        if not 0.0 < min_probability_delta <= 1.0:
+            raise ValueError("min_probability_delta must be in (0, 1]")
+        if calibration_observations < 0:
+            raise ValueError("calibration_observations must be non-negative")
+        if required_streak < 1 or evaluation_stride < 1 or smoothing <= 0.0:
+            raise ValueError("streak, stride, and smoothing must be positive")
+        self.reference_size = reference_size
+        self.recent_size = recent_size
+        self.min_recent_observations = min_recent_observations
+        self.likelihood_ratio_threshold = likelihood_ratio_threshold
+        self.min_probability_delta = min_probability_delta
+        self.required_streak = required_streak
+        self.evaluation_stride = evaluation_stride
+        self.calibration_observations = calibration_observations
+        self.smoothing = smoothing
+        self.reference: deque[OpponentObservation] = deque(maxlen=reference_size)
+        self.recent: deque[OpponentObservation] = deque(maxlen=recent_size)
+        self._updates = 0
+        self._streak = 0
+
+    @property
+    def ready(self) -> bool:
+        return len(self.reference) >= self.reference_size
+
+    def fit_reference(self, observations: Sequence[OpponentObservation]) -> None:
+        if len(observations) < self.reference_size:
+            raise ValueError("Not enough observations to fit detector reference")
+        self.reference = deque(observations[-self.reference_size :], maxlen=self.reference_size)
+        self.recent.clear()
+        self._updates = 0
+        self._streak = 0
+
+    @staticmethod
+    def _context_actions(facing_bet: bool) -> tuple[ActionType, ...]:
+        return (
+            (ActionType.FOLD, ActionType.CHECK_CALL, ActionType.RAISE)
+            if facing_bet
+            else (ActionType.CHECK_CALL, ActionType.RAISE)
+        )
+
+    def _compare_context(
+        self,
+        facing_bet: bool,
+    ) -> tuple[float, dict[str, float]]:
+        reference = [item for item in self.reference if item.facing_bet is facing_bet]
+        recent = [item for item in self.recent if item.facing_bet is facing_bet]
+        actions = self._context_actions(facing_bet)
+        if len(reference) < len(actions) * 2 or len(recent) < len(actions) * 2:
+            return 0.0, {}
+        reference_total = len(reference) + self.smoothing * len(actions)
+        recent_total = len(recent) + self.smoothing * len(actions)
+        pooled_total = reference_total + recent_total
+        likelihood_ratio = 0.0
+        deltas: dict[str, float] = {}
+        for action in actions:
+            reference_count = (
+                sum(item.action is action for item in reference) + self.smoothing
+            )
+            recent_count = sum(item.action is action for item in recent) + self.smoothing
+            reference_probability = reference_count / reference_total
+            recent_probability = recent_count / recent_total
+            pooled_probability = (reference_count + recent_count) / pooled_total
+            likelihood_ratio += 2.0 * (
+                reference_count * math.log(reference_probability / pooled_probability)
+                + recent_count * math.log(recent_probability / pooled_probability)
+            )
+            deltas[action.value] = recent_probability - reference_probability
+        return max(likelihood_ratio, 0.0), deltas
+
+    def update(self, observation: OpponentObservation) -> ConditionalDriftUpdate:
+        if not self.ready:
+            raise RuntimeError("fit_reference must be called before update")
+        if len(self.recent) == self.recent_size:
+            self.reference.append(self.recent.popleft())
+        self.recent.append(observation)
+        self._updates += 1
+        context_scores: dict[str, float] = {}
+        probability_deltas: dict[str, float] = {}
+        for facing_bet, context_name in ((False, "unopened"), (True, "facing_bet")):
+            score, deltas = self._compare_context(facing_bet)
+            context_scores[context_name] = score
+            probability_deltas.update(
+                {f"{context_name}:{action}": delta for action, delta in deltas.items()}
+            )
+        likelihood_ratio = sum(context_scores.values())
+        max_delta = max((abs(value) for value in probability_deltas.values()), default=0.0)
+        evaluated = (
+            len(self.recent) >= self.min_recent_observations
+            and self._updates > self.calibration_observations
+            and self._updates % self.evaluation_stride == 0
+        )
+        exceeded = (
+            likelihood_ratio >= self.likelihood_ratio_threshold
+            and max_delta >= self.min_probability_delta
+        )
+        if evaluated:
+            self._streak = self._streak + 1 if exceeded else 0
+        detected = evaluated and self._streak >= self.required_streak
+        return ConditionalDriftUpdate(
+            likelihood_ratio=likelihood_ratio,
+            max_probability_delta=max_delta,
+            change_detected=detected,
+            observations=len(self.recent),
+            context_likelihood_ratios=context_scores,
+            probability_deltas=probability_deltas,
+        )
+
+
 class SurpriseDetector:
     """Sliding-window normalized negative-log-likelihood change detector."""
 
@@ -212,11 +599,11 @@ class HeuristicHypothesisGenerator:
                 rationale="Low initiative and call-heavy continuing ranges.",
             ),
             OpponentWorld(
-                name="tight_switch",
-                open_raise_probability=0.14,
-                fold_vs_bet_probability=0.56,
+                name="probe_fold_switch",
+                open_raise_probability=0.42,
+                fold_vs_bet_probability=0.66,
                 reraise_probability=0.08,
-                rationale="Low opening pressure and high fold-to-bet frequency.",
+                rationale="Frequent probes followed by excessive folding to pressure.",
             ),
         ]
 

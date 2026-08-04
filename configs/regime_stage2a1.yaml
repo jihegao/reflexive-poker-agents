@@ -1,0 +1,57 @@
+stage2a1_calibration:
+  protocol: regime-stage2a1-eprocess-v1
+  claim_boundary: detector_tuning_and_fresh_validation_no_live_llm
+  tuning_seed_start: 12500
+  tuning_seed_count: 8
+  validation_seed_start: 13000
+  validation_seed_count: 12
+  hands: 400
+  switch_hand: 160
+  equity_samples: 2
+  simulation_rollouts: 240
+  simulation_equity_samples: 1
+  noise_levels: [0.05, 0.15]
+  detector:
+    reference_size: 96
+    block_size: 16
+    threshold_candidates: [3.0, 5.0, 10.0, 20.0, 50.0]
+    alternative_delta: 0.18
+    alternative_concentration: 32.0
+    minimum_direction_delta: 0.04
+    maximum_blocks: 64
+    earliest_detection_hand: 128
+  gates:
+    detection_rate: 0.70
+    median_delay_hands: 24
+    pre_switch_false_detection_rate: 0.10
+    no_switch_false_positive_rate: 0.10
+    pressure_selection_rate: 0.80
+    reflection_action_divergence: 0.01
+  policy_calibration:
+    path: results/experiments/regime-stage2a-calibration-v1-full/policy_calibration.json
+    sha256: 24841d1a3032dbc94eddad27c855536d32a94e788955ed4b4d741667b5a43e96
+  worlds:
+    pre:
+      open_raise_probability: 0.18
+      fold_vs_bet_probability: 0.42
+      reraise_probability: 0.10
+    switch:
+      open_raise_probability: 0.38
+      fold_vs_bet_probability: 0.62
+      reraise_probability: 0.10
+    proxy_hypotheses:
+      proxy_probe_fold_low:
+        open_raise_probability: 0.34
+        fold_vs_bet_probability: 0.58
+        reraise_probability: 0.12
+        prior: 1.0
+      proxy_probe_fold_high:
+        open_raise_probability: 0.42
+        fold_vs_bet_probability: 0.66
+        reraise_probability: 0.08
+        prior: 1.0
+      proxy_bluff_heavy_distractor:
+        open_raise_probability: 0.42
+        fold_vs_bet_probability: 0.24
+        reraise_probability: 0.32
+        prior: 0.5

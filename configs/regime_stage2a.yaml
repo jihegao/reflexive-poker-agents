@@ -1,0 +1,69 @@
+stage2a_calibration:
+  protocol: regime-stage2a-calibration-v1
+  claim_boundary: bounded_calibration_no_live_llm
+  seed_start: 12000
+  seed_count: 12
+  hands: 400
+  switch_hand: 160
+  equity_samples: 2
+  simulation_rollouts: 240
+  simulation_equity_samples: 1
+  policy_holdout_hands: 600
+  noise_levels: [0.05, 0.15]
+  detector:
+    reference_size: 64
+    recent_size: 40
+    min_recent_observations: 28
+    likelihood_ratio_threshold: 6.0
+    min_probability_delta: 0.08
+    required_streak: 4
+    evaluation_stride: 4
+    calibration_observations: 64
+    probe_direction_delta: 0.08
+    earliest_detection_hand: 128
+  selector:
+    confidence_z: 1.645
+    minimum_improvement_bb_per_hand: 0.0
+    probe_open_raise_minimum: 0.28
+    probe_fold_minimum: 0.52
+    probe_reraise_maximum: 0.22
+  gates:
+    detection_rate: 0.70
+    median_delay_hands: 24
+    no_switch_false_positive_rate: 0.10
+    pressure_selection_rate: 0.80
+    reflection_action_divergence: 0.01
+  worlds:
+    pre:
+      open_raise_probability: 0.18
+      fold_vs_bet_probability: 0.42
+      reraise_probability: 0.10
+    switch:
+      open_raise_probability: 0.38
+      fold_vs_bet_probability: 0.62
+      reraise_probability: 0.10
+    policy_holdouts:
+      holdout_probe_fold_low:
+        open_raise_probability: 0.34
+        fold_vs_bet_probability: 0.58
+        reraise_probability: 0.12
+      holdout_probe_fold_high:
+        open_raise_probability: 0.42
+        fold_vs_bet_probability: 0.66
+        reraise_probability: 0.08
+    proxy_hypotheses:
+      proxy_probe_fold_low:
+        open_raise_probability: 0.34
+        fold_vs_bet_probability: 0.58
+        reraise_probability: 0.12
+        prior: 1.0
+      proxy_probe_fold_high:
+        open_raise_probability: 0.42
+        fold_vs_bet_probability: 0.66
+        reraise_probability: 0.08
+        prior: 1.0
+      proxy_bluff_heavy_distractor:
+        open_raise_probability: 0.42
+        fold_vs_bet_probability: 0.24
+        reraise_probability: 0.32
+        prior: 0.5

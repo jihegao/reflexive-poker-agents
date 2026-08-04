@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .agents import AgentStyle, PokerAgent
 from .environment import EnvironmentConfig, HoldemEnvironment
@@ -107,39 +108,16 @@ class _WorldPolicyOpponent(PokerAgent):
         self.world = world
         self.condition = f"rollout_world_{world.name}"
 
-    def _weights(
-        self,
-        context: DecisionContext,
-        equity: float,
-    ) -> dict[ActionType, float]:
+    def _weights(self, context: DecisionContext) -> dict[ActionType, float]:
         facing_bet = context.to_call > 1e-9
         base = self.world.action_probabilities(facing_bet)
-        bluff_pressure = max(
-            self.world.open_raise_probability + self.world.reraise_probability - 0.40,
-            0.0,
-        )
-        weights = {
-            ActionType.FOLD: base[ActionType.FOLD]
-            * max(1.35 - 1.65 * equity, 0.04),
-            ActionType.CHECK_CALL: base[ActionType.CHECK_CALL]
-            * (0.35 + 1.15 * equity),
-            ActionType.RAISE: base[ActionType.RAISE]
-            * (0.18 + 1.55 * equity + bluff_pressure * (1.0 - equity)),
-        }
         return {
-            action: max(weights[action], 1e-9)
+            action: max(base[action], 1e-9)
             for action in context.legal_actions
         }
 
     def act(self, context: DecisionContext) -> Decision:
-        equity = estimate_equity(
-            context.hole_cards,
-            context.board,
-            max(1, context.active_players - 1),
-            self.rng,
-            self.style.equity_samples,
-        )
-        weights = self._weights(context, equity)
+        weights = self._weights(context)
         draw = self.rng.random() * sum(weights.values())
         cumulative = 0.0
         action = ActionType.CHECK_CALL
@@ -150,8 +128,8 @@ class _WorldPolicyOpponent(PokerAgent):
                 break
         return Decision(
             action=action,
-            raise_scale=0.52 + 0.22 * min(max(equity, 0.0), 1.0),
-            equity=equity,
+            raise_scale=0.55,
+            equity=0.5,
             reasoning_depth=0,
             reasoning_ops=1,
             metadata={"rollout_world": self.world.name},
@@ -166,6 +144,7 @@ class SimulationResult:
     expected_bb_per_decision: float
     response_values: dict[str, float]
     rollout_hands: int
+    response_samples: dict[str, tuple[float, ...]] = field(repr=False)
     simulation_unit: str = "full_hand"
 
     @property
@@ -228,14 +207,13 @@ class WorldSimulator:
             for index, character in enumerate(name)
         )
 
-    def _rollout_value(
+    def _rollout_rewards(
         self,
         world: OpponentWorld,
         response_policy: str,
-    ) -> float:
+    ) -> tuple[float, ...]:
         first_mirror_hands = (self.rollouts + 1) // 2
-        total_reward = 0.0
-        total_hands = 0
+        rewards: list[float] = []
         world_seed = self._stable_name_seed(world.name)
         response_index = RESPONSE_POLICIES.index(response_policy)
         for mirror in (0, 1):
@@ -275,10 +253,9 @@ class WorldSimulator:
                     regime_switch_hand=hands + 1,
                 ),
             ).play(hands)
-            total_reward += sum(record.rewards["hero"] for record in records)
-            total_hands += hands
-        self.simulated_hands += total_hands
-        return total_reward / max(total_hands, 1)
+            rewards.extend(record.rewards["hero"] for record in records)
+        self.simulated_hands += len(rewards)
+        return tuple(rewards)
 
     def evaluate(
         self,
@@ -291,9 +268,13 @@ class WorldSimulator:
         posteriors = self._posterior(worlds, observations)
         results: list[SimulationResult] = []
         for world, posterior in zip(worlds, posteriors, strict=True):
-            values = {
-                response: self._rollout_value(world, response)
+            samples = {
+                response: self._rollout_rewards(world, response)
                 for response in RESPONSE_POLICIES
+            }
+            values = {
+                response: statistics.fmean(response_samples)
+                for response, response_samples in samples.items()
             }
             best_response = max(values, key=values.get)
             results.append(
@@ -304,6 +285,7 @@ class WorldSimulator:
                     expected_bb_per_decision=values[best_response],
                     response_values=values,
                     rollout_hands=self.rollouts,
+                    response_samples=samples,
                 )
             )
         return sorted(results, key=lambda result: result.posterior, reverse=True)
@@ -320,3 +302,54 @@ class WorldSimulator:
                 aggregate[response] += result.posterior * value
         best = max(aggregate, key=aggregate.get)
         return best, aggregate[best]
+
+    @staticmethod
+    def choose_response_robust(
+        results: Sequence[SimulationResult],
+        *,
+        safe_policy: str = "balanced",
+        confidence_z: float = 1.645,
+        minimum_improvement: float = 0.0,
+    ) -> tuple[str, float, float]:
+        """Choose a response only when its paired lower bound beats the safe policy."""
+
+        if safe_policy not in RESPONSE_POLICIES:
+            raise ValueError(f"Unknown safe policy: {safe_policy}")
+        if not results:
+            return safe_policy, 0.0, 0.0
+        aggregate: Counter[str] = Counter()
+        for result in results:
+            for response, value in result.response_values.items():
+                aggregate[response] += result.posterior * value
+        candidates: list[tuple[float, str, float]] = []
+        for response in RESPONSE_POLICIES:
+            if response == safe_policy:
+                continue
+            sample_count = min(
+                len(result.response_samples[response])
+                for result in results
+            )
+            deltas = [
+                sum(
+                    result.posterior
+                    * (
+                        result.response_samples[response][index]
+                        - result.response_samples[safe_policy][index]
+                    )
+                    for result in results
+                )
+                for index in range(sample_count)
+            ]
+            mean_delta = statistics.fmean(deltas)
+            standard_error = (
+                statistics.stdev(deltas) / math.sqrt(len(deltas))
+                if len(deltas) > 1
+                else math.inf
+            )
+            lower_bound = mean_delta - confidence_z * standard_error
+            if lower_bound > minimum_improvement:
+                candidates.append((aggregate[response], response, lower_bound))
+        if not candidates:
+            return safe_policy, aggregate[safe_policy], 0.0
+        expected_value, response, lower_bound = max(candidates)
+        return response, expected_value, lower_bound

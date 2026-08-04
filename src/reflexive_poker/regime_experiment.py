@@ -22,6 +22,9 @@ from .regime_agents import (
 from .regime_detection import SurpriseDetector
 from .regime_simulation import WorldSimulator
 
+REGIME_CONDITIONS = ("baseline", "reflection", "reflection_simulation")
+REGIME_MIRRORS = (0, 1)
+
 
 @dataclass(frozen=True)
 class RegimeExperimentConfig:
@@ -135,88 +138,97 @@ def run_regime_switch_experiment(
     if config.simulation_rollout_hands < 2:
         raise ValueError("simulation_rollout_hands must be at least two")
     rows: list[RegimeExperimentRow] = []
-    for condition in ("baseline", "reflection", "reflection_simulation"):
+    for condition in REGIME_CONDITIONS:
         for seed in config.seeds:
-            for mirror in (0, 1):
-                hero = _make_hero(condition, seed * 17 + 1, config)
-                opponent = RegimeSwitchingOpponent(
-                    "opponent",
-                    seed * 17 + 2,
-                    config.switch_hand,
-                    AgentStyle(equity_samples=config.equity_samples),
-                )
-                agents = [hero, opponent] if mirror == 0 else [opponent, hero]
-                environment = HoldemEnvironment(
-                    agents,
-                    seed=seed,
-                    config=EnvironmentConfig(
-                        starting_stack=100.0,
-                        small_blind=0.5,
-                        big_blind=1.0,
-                        max_raises_per_street=2,
-                        regime_switch_hand=config.switch_hand,
-                    ),
-                )
-                rewards = [
-                    record.rewards["hero"] for record in environment.play(config.hands)
-                ]
-                pre = sum(rewards[: config.switch_hand])
-                post = sum(rewards[config.switch_hand :])
-                detected_change_hand = None
-                hypothesis_calls = 0
-                simulation_calls = 0
-                simulated_hands = 0
-                final_response_policy = None
-                surprise_threshold = None
-                calibration_complete = None
-                if isinstance(hero, SimulationEnhancedReflectionAgent):
-                    detected_change_hand = next(
-                        (
-                            hand
-                            for hand in hero.state.detected_changes
-                            if hand >= config.switch_hand
-                        ),
-                        None,
-                    )
-                    hypothesis_calls = hero.generator.calls
-                    simulation_calls = hero.simulator.calls
-                    simulated_hands = hero.simulator.simulated_hands
-                    final_response_policy = hero.state.response_policy
-                    surprise_threshold = hero.detector.threshold
-                    calibration_complete = hero.calibration_complete
-                rows.append(
-                    RegimeExperimentRow(
-                        condition=condition,
-                        seed=seed,
-                        mirror=mirror,
-                        total_reward_bb=sum(rewards),
-                        pre_switch_reward_bb=pre,
-                        post_switch_reward_bb=post,
-                        post_switch_bb100=(
-                            100.0 * post / (config.hands - config.switch_hand)
-                        ),
-                        recovery_hands=_recovery_hands(
-                            rewards,
-                            config.switch_hand,
-                            config.recovery_window,
-                        ),
-                        detected_change_hand=detected_change_hand,
-                        detection_delay_hands=(
-                            None
-                            if detected_change_hand is None
-                            else detected_change_hand - config.switch_hand
-                        ),
-                        hypothesis_calls=hypothesis_calls,
-                        simulation_calls=simulation_calls,
-                        simulated_hands=simulated_hands,
-                        final_response_policy=final_response_policy,
-                        surprise_threshold=surprise_threshold,
-                        calibration_complete=calibration_complete,
-                    )
-                )
+            for mirror in REGIME_MIRRORS:
+                rows.append(run_regime_match(config, condition, seed, mirror))
     if config.output_dir is not None:
         write_regime_experiment(rows, config.output_dir)
     return rows
+
+
+def run_regime_match(
+    config: RegimeExperimentConfig,
+    condition: str,
+    seed: int,
+    mirror: int,
+) -> RegimeExperimentRow:
+    """Run one independently checkpointable condition/seed/seat block."""
+    if condition not in REGIME_CONDITIONS:
+        raise ValueError(f"Unknown condition: {condition}")
+    if mirror not in REGIME_MIRRORS:
+        raise ValueError(f"Unknown mirror: {mirror}")
+    if config.switch_hand <= 0 or config.switch_hand >= config.hands:
+        raise ValueError("switch_hand must fall inside the experiment horizon")
+    if config.simulation_rollout_hands < 2:
+        raise ValueError("simulation_rollout_hands must be at least two")
+
+    hero = _make_hero(condition, seed * 17 + 1, config)
+    opponent = RegimeSwitchingOpponent(
+        "opponent",
+        seed * 17 + 2,
+        config.switch_hand,
+        AgentStyle(equity_samples=config.equity_samples),
+    )
+    agents = [hero, opponent] if mirror == 0 else [opponent, hero]
+    environment = HoldemEnvironment(
+        agents,
+        seed=seed,
+        config=EnvironmentConfig(
+            starting_stack=100.0,
+            small_blind=0.5,
+            big_blind=1.0,
+            max_raises_per_street=2,
+            regime_switch_hand=config.switch_hand,
+        ),
+    )
+    rewards = [record.rewards["hero"] for record in environment.play(config.hands)]
+    pre = sum(rewards[: config.switch_hand])
+    post = sum(rewards[config.switch_hand :])
+    detected_change_hand = None
+    hypothesis_calls = 0
+    simulation_calls = 0
+    simulated_hands = 0
+    final_response_policy = None
+    surprise_threshold = None
+    calibration_complete = None
+    if isinstance(hero, SimulationEnhancedReflectionAgent):
+        detected_change_hand = next(
+            (hand for hand in hero.state.detected_changes if hand >= config.switch_hand),
+            None,
+        )
+        hypothesis_calls = hero.generator.calls
+        simulation_calls = hero.simulator.calls
+        simulated_hands = hero.simulator.simulated_hands
+        final_response_policy = hero.state.response_policy
+        surprise_threshold = hero.detector.threshold
+        calibration_complete = hero.calibration_complete
+    return RegimeExperimentRow(
+        condition=condition,
+        seed=seed,
+        mirror=mirror,
+        total_reward_bb=sum(rewards),
+        pre_switch_reward_bb=pre,
+        post_switch_reward_bb=post,
+        post_switch_bb100=100.0 * post / (config.hands - config.switch_hand),
+        recovery_hands=_recovery_hands(
+            rewards,
+            config.switch_hand,
+            config.recovery_window,
+        ),
+        detected_change_hand=detected_change_hand,
+        detection_delay_hands=(
+            None
+            if detected_change_hand is None
+            else detected_change_hand - config.switch_hand
+        ),
+        hypothesis_calls=hypothesis_calls,
+        simulation_calls=simulation_calls,
+        simulated_hands=simulated_hands,
+        final_response_policy=final_response_policy,
+        surprise_threshold=surprise_threshold,
+        calibration_complete=calibration_complete,
+    )
 
 
 def summarize_regime_experiment(

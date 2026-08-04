@@ -17,14 +17,25 @@ from .regime_detection import (
     empirical_world,
 )
 from .regime_experiment import (
+    REGIME_CONDITIONS,
+    REGIME_MIRRORS,
     RegimeExperimentConfig,
     RegimeExperimentRow,
     RegimePairedEffect,
     paired_regime_effects,
+    run_regime_match,
     run_regime_switch_experiment,
     summarize_paired_regime_effects,
     summarize_regime_experiment,
     write_regime_experiment,
+)
+from .regime_runner import (
+    REGIME_RUN_PROTOCOL,
+    RegimeCheckpointError,
+    RegimeRunConfig,
+    RegimeRunError,
+    regime_run_config_from_mapping,
+    run_regime_experiment_resumable,
 )
 from .regime_simulation import (
     RESPONSE_POLICIES,
@@ -32,10 +43,14 @@ from .regime_simulation import (
     WorldSimulator,
     response_policy_decision,
 )
+from .regime_statistics import build_regime_statistics, write_regime_statistics
 
 __all__ = [
     "DEFAULT_WORLD",
     "HYPOTHESIS_SCHEMA",
+    "REGIME_CONDITIONS",
+    "REGIME_MIRRORS",
+    "REGIME_RUN_PROTOCOL",
     "RESPONSE_POLICIES",
     "AdaptationState",
     "HeuristicHypothesisGenerator",
@@ -44,20 +59,28 @@ __all__ = [
     "OpponentWorld",
     "ProviderHypothesisGenerator",
     "ReflectionTrackerAgent",
+    "RegimeCheckpointError",
     "RegimeExperimentConfig",
     "RegimeExperimentRow",
     "RegimePairedEffect",
+    "RegimeRunConfig",
+    "RegimeRunError",
     "RegimeSwitchingOpponent",
     "SimulationEnhancedReflectionAgent",
     "SimulationResult",
     "SurpriseDetector",
     "SurpriseUpdate",
     "WorldSimulator",
+    "build_regime_statistics",
     "empirical_world",
     "paired_regime_effects",
+    "regime_run_config_from_mapping",
     "response_policy_decision",
+    "run_regime_experiment_resumable",
+    "run_regime_match",
     "run_regime_switch_experiment",
     "summarize_paired_regime_effects",
     "summarize_regime_experiment",
     "write_regime_experiment",
+    "write_regime_statistics",
 ]

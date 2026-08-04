@@ -62,6 +62,10 @@ The runner writes:
   differences;
 - `paired_summary.json`: paired means with Student-t 95% confidence intervals.
 
+The development runner above is intentionally small. Formal pilots use the resumable
+runner described below; only its fail-closed evidence bundle is admissible for a formal
+interpretation.
+
 Primary metrics are post-switch BB/100 and recovery hands. Detection delay and simulated
 hands quantify mechanism behavior and additional cost.
 
@@ -93,3 +97,63 @@ live-equity samples, and 16 full-hand rollouts per response/world produced:
 This is a wiring and calibration result, not evidence of a profitability advantage. The
 central claim remains unsupported until a larger preregistered paired run passes the
 repository's provenance, completion, cost, and inference gates.
+
+## Resumable 30-seed formal pilot
+
+[`configs/regime_pilot.yaml`](../configs/regime_pilot.yaml) freezes 30 seeds, both seat
+mirrors, all three conditions, 320 hands, and the calibrated full-hand rollout settings.
+Its schedule contains 180 independently checkpointed match blocks and 60 expected paired
+`seed × mirror` inference blocks.
+
+Use the repository experiment registry for normal execution:
+
+```bash
+uv run expctl config validate configs/regime_pilot.yaml --output json
+
+uv run expctl run start \
+  --config configs/regime_pilot.yaml \
+  --experiment regime-adaptation \
+  --request-id regime-formal-pilot-v1 \
+  --tag regime-formal-pilot \
+  --output json
+
+uv run expctl run status <run-id> --output json
+uv run expctl run logs <run-id> --follow --format jsonl
+uv run expctl run resume <run-id> --output json
+uv run expctl analyze <run-id> --output json
+```
+
+The direct, foreground-compatible entry point uses the same runner and artifact contract:
+
+```bash
+PYTHONPATH=src uv run python scripts/run_regime_resumable.py \
+  --config configs/regime_pilot.yaml
+```
+
+The runner freezes `FROZEN_CONFIG.json` and `SEED_MANIFEST.json`, then writes each
+`condition × seed × mirror` result to a checksummed JSON checkpoint with an atomic rename.
+Completed checkpoints are verified and skipped on resume. A changed frozen plan or a
+malformed/checksum-mismatched checkpoint fails closed; it is not silently deleted or
+recomputed. Failed and interrupted attempts remain under `failures/`.
+
+Aggregate artifacts are also rewritten atomically:
+
+- `COMPLETION_STATUS.json`: total, completed, missing, failed, and corrupt blocks;
+- `matches.csv` and `summary.json`: complete or explicitly partial match summaries;
+- `paired_blocks.csv`: the full expected paired-block schedule and validity flags;
+- `paired_effects.csv`: effects from complete paired blocks only;
+- `paired_summary.json`: Student-t 95% intervals and valid-block counts;
+- `EVIDENCE_GATE.json`: the fail-closed formal evidence decision;
+- `COMPLETED.json`: emitted only after every match and paired block passes completion.
+
+`formal_conclusion_allowed` remains false unless all 180 match checkpoints and all 60
+paired blocks are valid. A completed gate permits interpretation of the resulting
+intervals; it does not itself imply that reflection plus simulation improves recovery or
+reward.
+
+## Runtime-limit policy
+
+Long runs should be stopped, resumed, or allowed to continue in the background. The
+operational control is durable checkpoint/resume, not an unbounded foreground timeout.
+Increasing a client timeout does not make partial output admissible and is never a
+substitute for `COMPLETION_STATUS.json` plus a valid `EVIDENCE_GATE.json`.

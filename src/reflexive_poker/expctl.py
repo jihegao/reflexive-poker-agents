@@ -30,6 +30,12 @@ from .phase1_resumable import (
 )
 from .phase2_framework import Phase2OfflineRunConfig, run_phase2_offline
 from .phase2_readiness import audit_phase2_readiness
+from .regime_runner import (
+    RegimeCheckpointError,
+    RegimeRunError,
+    regime_run_config_from_mapping,
+    run_regime_experiment_resumable,
+)
 
 SCHEMA_VERSION = 1
 TERMINAL_STATES = {"completed", "failed", "cancelled"}
@@ -42,6 +48,7 @@ EXPERIMENTS = {
     "paper-phase1": "Run preflight, offline evidence, and paired closed-loop confirmation.",
     "paper-phase2-preflight": "Run the bounded four-system Phase 2 provider preflight only.",
     "paper-phase2-offline": "Run four-system Phase 2 offline evidence after the frozen readiness gate.",
+    "regime-adaptation": "Run or resume the frozen regime-switch formal pilot.",
 }
 
 
@@ -70,6 +77,13 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_bytes(payload)
     os.replace(temporary, path)
 
 
@@ -144,6 +158,11 @@ def _load_config(path: Path) -> dict[str, Any]:
                     details={"field": "paper_phase2.serving_systems"},
                 )
             identities.add(identity)
+    if "regime_adaptation" in payload:
+        try:
+            regime_run_config_from_mapping(payload, output_dir=Path("."))
+        except (TypeError, ValueError) as exc:
+            raise ExpctlError("CONFIG_INVALID", str(exc)) from exc
     try:
         resolve_phase1_pricing(path.resolve(), payload)
     except PricingManifestError as exc:
@@ -324,7 +343,7 @@ def _offline_config(
 def _freeze_run_sources(metadata: dict[str, Any], artifacts: Path) -> dict[str, Any]:
     """Archive the byte-for-byte price input copied before the worker spawned."""
     pricing_path = metadata.get("pricing_manifest_artifact")
-    frozen_inputs: dict[str, Path] | None = None
+    frozen_inputs: dict[str, Path] = {}
     if pricing_path is not None:
         path = Path(str(pricing_path))
         expected = metadata.get("pricing_manifest_sha256")
@@ -333,11 +352,21 @@ def _freeze_run_sources(metadata: dict[str, Any], artifacts: Path) -> dict[str, 
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != expected:
             raise ExpctlError("PRICING_MANIFEST_MUTATED", "run-local pricing manifest hash changed")
-        frozen_inputs = {"frozen_inputs/PRICE_MANIFEST.json": path}
+        frozen_inputs["frozen_inputs/PRICE_MANIFEST.json"] = path
+    frozen_config_path = metadata.get("frozen_config_path")
+    if frozen_config_path is not None:
+        path = Path(str(frozen_config_path))
+        expected = metadata.get("frozen_config_sha256")
+        if not path.exists():
+            raise ExpctlError("FROZEN_CONFIG_MISSING", "run-local frozen config is missing")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            raise ExpctlError("FROZEN_CONFIG_MUTATED", "run-local frozen config hash changed")
+        frozen_inputs["frozen_inputs/CONFIG.yaml"] = path
     provenance = freeze_phase1_source_snapshot(
         artifacts,
         allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
-        frozen_inputs=frozen_inputs,
+        frozen_inputs=frozen_inputs or None,
     )
     if pricing_path is not None:
         provenance = {
@@ -389,12 +418,53 @@ def _run_offline_models(
 
 
 def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
-    config = _load_config(Path(metadata["config_path"]))
     experiment = metadata["experiment"]
+    config_input = (
+        metadata.get("frozen_config_path")
+        if experiment == "regime-adaptation"
+        else metadata["config_path"]
+    )
+    config = _load_config(Path(str(config_input)))
     artifacts = run_dir / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     phase = _paper_config(config)
-    if experiment == "offline-baselines":
+    if experiment == "regime-adaptation":
+        source_provenance = _freeze_run_sources(metadata, artifacts)
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
+        try:
+            run_config = regime_run_config_from_mapping(
+                config,
+                output_dir=artifacts / "regime_adaptation",
+                run_id=str(metadata["run_id"]),
+                max_blocks=metadata.get("max_blocks"),
+            )
+            status = run_regime_experiment_resumable(run_config)
+        except RegimeCheckpointError as exc:
+            raise ExpctlError(
+                "REGIME_CHECKPOINT_INVALID",
+                str(exc),
+                details={"artifact_dir": str(artifacts / "regime_adaptation")},
+            ) from exc
+        except RegimeRunError as exc:
+            raise ExpctlError(
+                "REGIME_RUN_FAILED",
+                str(exc),
+                retryable=True,
+                details={"artifact_dir": str(artifacts / "regime_adaptation")},
+            ) from exc
+        if status.get("formal_completion_valid") is not True:
+            raise ExpctlError(
+                "FORMAL_COMPLETION_INVALID",
+                "Regime-adaptation run is incomplete; formal conclusions are prohibited",
+                retryable=True,
+                details=status,
+            )
+    elif experiment == "offline-baselines":
         source_provenance = _freeze_run_sources(metadata, artifacts)
         _event(
             run_dir,
@@ -698,6 +768,26 @@ def _refresh_status(run_dir: Path) -> dict[str, Any]:
             },
         )
         _event(run_dir, "run_failed", error_code="WORKER_DISAPPEARED")
+    if metadata.get("experiment") == "regime-adaptation":
+        progress_path = Path(metadata["artifact_dir"]) / "regime_adaptation" / "COMPLETION_STATUS.json"
+        if progress_path.exists():
+            try:
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                progress = {"state": "invalid", "formal_completion_valid": False}
+            metadata = {
+                **metadata,
+                "progress": {
+                    key: progress.get(key)
+                    for key in (
+                        "state",
+                        "completed_blocks",
+                        "total_blocks",
+                        "valid_paired_blocks",
+                        "formal_completion_valid",
+                    )
+                },
+            }
     return metadata
 
 
@@ -754,6 +844,13 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
     run_id = f"{stamp}-{uuid.uuid4().hex[:10]}"
     run_dir = _run_dir(root, run_id)
     run_dir.mkdir(parents=True)
+    frozen_config_path: Path | None = None
+    frozen_config_sha256: str | None = None
+    if args.experiment == "regime-adaptation":
+        frozen_config_path = run_dir / "frozen_inputs" / "CONFIG.yaml"
+        config_bytes = config_path.read_bytes()
+        _atomic_bytes(frozen_config_path, config_bytes)
+        frozen_config_sha256 = hashlib.sha256(config_bytes).hexdigest()
     pricing_artifact: Path | None = None
     if pricing is not None:
         pricing_artifact = run_dir / "frozen_inputs" / "PRICE_MANIFEST.json"
@@ -791,6 +888,8 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
         "phase2_preflight_dir": getattr(args, "phase2_preflight_dir", None),
         "phase2_pricing_manifest": getattr(args, "phase2_pricing_manifest", None),
         "phase2_power_analysis": getattr(args, "phase2_power_analysis", None),
+        "frozen_config_path": str(frozen_config_path) if frozen_config_path else None,
+        "frozen_config_sha256": frozen_config_sha256,
         "worker_command": worker_command,
     }
     if pricing is not None and pricing_artifact is not None:
@@ -931,6 +1030,12 @@ def _analyze(run_dir: Path) -> dict[str, Any]:
         "provider_gates": [
             json.loads(path.read_text(encoding="utf-8"))
             for path in sorted(artifacts.rglob("provider_gate.json"))
+        ]
+        if artifacts.exists()
+        else [],
+        "evidence_gates": [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(artifacts.rglob("EVIDENCE_GATE.json"))
         ]
         if artifacts.exists()
         else [],

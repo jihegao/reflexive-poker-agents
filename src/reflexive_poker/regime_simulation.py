@@ -1,14 +1,161 @@
 from __future__ import annotations
 
 import math
-import random
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import ClassVar
 
-from .models import ActionType
-from .regime_detection import OpponentWorld
+from .agents import AgentStyle, PokerAgent
+from .environment import EnvironmentConfig, HoldemEnvironment
+from .equity import estimate_equity
+from .models import ActionType, Decision, DecisionContext
+from .regime_detection import OpponentObservation, OpponentWorld
+
+RESPONSE_POLICIES = ("pressure", "balanced", "bluff_catch")
+
+
+def response_policy_decision(
+    agent: PokerAgent,
+    context: DecisionContext,
+    response_policy: str,
+    *,
+    metadata: dict[str, object] | None = None,
+) -> Decision:
+    """Apply the same response policy in live play and counterfactual rollout."""
+
+    if response_policy not in RESPONSE_POLICIES:
+        raise ValueError(f"Unknown response policy: {response_policy}")
+    equity = estimate_equity(
+        context.hole_cards,
+        context.board,
+        max(1, context.active_players - 1),
+        agent.rng,
+        agent.style.equity_samples,
+    )
+    pot_odds = context.to_call / max(context.pot + context.to_call, 1e-9)
+    can_raise = ActionType.RAISE in context.legal_actions
+    aggression = agent.style.aggression
+    call_margin = agent.style.risk_margin
+    raise_scale = 0.54
+    if response_policy == "pressure":
+        aggression = min(aggression + 0.22, 0.97)
+        call_margin += 0.01
+        raise_scale = 0.56
+    elif response_policy == "bluff_catch":
+        aggression = max(aggression - 0.08, 0.04)
+        if context.to_call > 0:
+            call_margin += 0.13
+        raise_scale = 0.48
+
+    if context.to_call > 0:
+        raise_threshold = 0.80 - 0.11 * aggression
+        if response_policy == "bluff_catch":
+            raise_threshold += 0.08
+        if can_raise and equity > raise_threshold:
+            action = ActionType.RAISE
+        elif equity + 0.02 >= pot_odds - call_margin:
+            action = ActionType.CHECK_CALL
+        else:
+            action = ActionType.FOLD
+    else:
+        threshold = 0.66 - 0.18 * aggression
+        if response_policy == "pressure":
+            threshold -= 0.10
+        elif response_policy == "bluff_catch":
+            threshold += 0.06
+        action = (
+            ActionType.RAISE
+            if can_raise and equity > threshold
+            else ActionType.CHECK_CALL
+        )
+
+    return Decision(
+        action=action,
+        raise_scale=raise_scale,
+        equity=equity,
+        reasoning_depth=2,
+        reasoning_ops=7,
+        metadata=metadata or {},
+    )
+
+
+class _ResponsePolicyAgent(PokerAgent):
+    def __init__(
+        self,
+        name: str,
+        seed: int,
+        response_policy: str,
+        style: AgentStyle,
+    ) -> None:
+        super().__init__(name, seed, style)
+        self.response_policy = response_policy
+        self.condition = f"rollout_{response_policy}"
+
+    def act(self, context: DecisionContext) -> Decision:
+        return response_policy_decision(self, context, self.response_policy)
+
+
+class _WorldPolicyOpponent(PokerAgent):
+    def __init__(
+        self,
+        name: str,
+        seed: int,
+        world: OpponentWorld,
+        style: AgentStyle,
+    ) -> None:
+        super().__init__(name, seed, style)
+        self.world = world
+        self.condition = f"rollout_world_{world.name}"
+
+    def _weights(
+        self,
+        context: DecisionContext,
+        equity: float,
+    ) -> dict[ActionType, float]:
+        facing_bet = context.to_call > 1e-9
+        base = self.world.action_probabilities(facing_bet)
+        bluff_pressure = max(
+            self.world.open_raise_probability + self.world.reraise_probability - 0.40,
+            0.0,
+        )
+        weights = {
+            ActionType.FOLD: base[ActionType.FOLD]
+            * max(1.35 - 1.65 * equity, 0.04),
+            ActionType.CHECK_CALL: base[ActionType.CHECK_CALL]
+            * (0.35 + 1.15 * equity),
+            ActionType.RAISE: base[ActionType.RAISE]
+            * (0.18 + 1.55 * equity + bluff_pressure * (1.0 - equity)),
+        }
+        return {
+            action: max(weights[action], 1e-9)
+            for action in context.legal_actions
+        }
+
+    def act(self, context: DecisionContext) -> Decision:
+        equity = estimate_equity(
+            context.hole_cards,
+            context.board,
+            max(1, context.active_players - 1),
+            self.rng,
+            self.style.equity_samples,
+        )
+        weights = self._weights(context, equity)
+        draw = self.rng.random() * sum(weights.values())
+        cumulative = 0.0
+        action = ActionType.CHECK_CALL
+        for candidate in context.legal_actions:
+            cumulative += weights[candidate]
+            if draw <= cumulative:
+                action = candidate
+                break
+        return Decision(
+            action=action,
+            raise_scale=0.52 + 0.22 * min(max(equity, 0.0), 1.0),
+            equity=equity,
+            reasoning_depth=0,
+            reasoning_ops=1,
+            metadata={"rollout_world": self.world.name},
+        )
 
 
 @dataclass(frozen=True)
@@ -18,80 +165,153 @@ class SimulationResult:
     best_response: str
     expected_bb_per_decision: float
     response_values: dict[str, float]
+    rollout_hands: int
+    simulation_unit: str = "full_hand"
+
+    @property
+    def expected_bb_per_hand(self) -> float:
+        return self.expected_bb_per_decision
 
 
 class WorldSimulator:
-    PAYOFFS: ClassVar[dict[str, dict[ActionType, float]]] = {
-        "pressure": {
-            ActionType.FOLD: 0.42,
-            ActionType.CHECK_CALL: 0.08,
-            ActionType.RAISE: -0.34,
-        },
-        "balanced": {
-            ActionType.FOLD: 0.18,
-            ActionType.CHECK_CALL: 0.12,
-            ActionType.RAISE: -0.08,
-        },
-        "bluff_catch": {
-            ActionType.FOLD: 0.05,
-            ActionType.CHECK_CALL: 0.06,
-            ActionType.RAISE: 0.20,
-        },
-    }
+    """Evaluate candidate worlds with paired full-hand Hold'em rollouts.
 
-    def __init__(self, rollouts: int = 2000, seed: int = 0) -> None:
-        if rollouts < 1:
-            raise ValueError("rollouts must be positive")
+    Every response policy receives the same deck and seat seeds for a given
+    candidate world. The simulator therefore compares complete hand outcomes,
+    including folds, betting, side pots, and showdown, rather than a static
+    action-payoff table.
+    """
+
+    def __init__(
+        self,
+        rollouts: int = 48,
+        seed: int = 0,
+        *,
+        equity_samples: int = 1,
+        starting_stack: float = 100.0,
+        max_raises_per_street: int | None = 2,
+    ) -> None:
+        if rollouts < 2:
+            raise ValueError("rollouts must be at least two")
+        if equity_samples < 1:
+            raise ValueError("equity_samples must be positive")
         self.rollouts = rollouts
-        self.rng = random.Random(seed)
+        self.seed = seed
+        self.equity_samples = equity_samples
+        self.starting_stack = starting_stack
+        self.max_raises_per_street = max_raises_per_street
         self.calls = 0
+        self.simulated_hands = 0
 
     @staticmethod
-    def _sample_action(world: OpponentWorld, value: float) -> ActionType:
-        if value < world.fold_probability:
-            return ActionType.FOLD
-        if value < world.fold_probability + world.call_probability:
-            return ActionType.CHECK_CALL
-        return ActionType.RAISE
-
-    def evaluate(
-        self,
+    def _posterior(
         worlds: Sequence[OpponentWorld],
-        observations: Sequence[ActionType],
-    ) -> list[SimulationResult]:
-        if not worlds:
-            raise ValueError("At least one world is required")
-        self.calls += 1
+        observations: Sequence[OpponentObservation],
+    ) -> list[float]:
         log_weights = [
             math.log(world.prior)
-            + sum(math.log(world.probability(action)) for action in observations)
+            + sum(
+                math.log(world.probability(observation))
+                for observation in observations
+            )
             for world in worlds
         ]
         anchor = max(log_weights)
         weights = [math.exp(value - anchor) for value in log_weights]
-        posteriors = [value / sum(weights) for value in weights]
+        total = sum(weights)
+        return [weight / total for weight in weights]
+
+    @staticmethod
+    def _stable_name_seed(name: str) -> int:
+        return sum(
+            (index + 1) * ord(character)
+            for index, character in enumerate(name)
+        )
+
+    def _rollout_value(
+        self,
+        world: OpponentWorld,
+        response_policy: str,
+    ) -> float:
+        first_mirror_hands = (self.rollouts + 1) // 2
+        total_reward = 0.0
+        total_hands = 0
+        world_seed = self._stable_name_seed(world.name)
+        response_index = RESPONSE_POLICIES.index(response_policy)
+        for mirror in (0, 1):
+            hands = (
+                first_mirror_hands
+                if mirror == 0
+                else self.rollouts - first_mirror_hands
+            )
+            if hands <= 0:
+                continue
+            environment_seed = self.seed + world_seed * 101 + mirror * 100_003
+            hero = _ResponsePolicyAgent(
+                name="hero",
+                seed=environment_seed + 7_001 + response_index * 997,
+                response_policy=response_policy,
+                style=AgentStyle(
+                    aggression=0.40,
+                    risk_margin=-0.045,
+                    equity_samples=self.equity_samples,
+                ),
+            )
+            opponent = _WorldPolicyOpponent(
+                name="opponent",
+                seed=environment_seed + 11_003,
+                world=world,
+                style=AgentStyle(equity_samples=self.equity_samples),
+            )
+            agents = [hero, opponent] if mirror == 0 else [opponent, hero]
+            records = HoldemEnvironment(
+                agents,
+                seed=environment_seed,
+                config=EnvironmentConfig(
+                    starting_stack=self.starting_stack,
+                    small_blind=0.5,
+                    big_blind=1.0,
+                    max_raises_per_street=self.max_raises_per_street,
+                    regime_switch_hand=hands + 1,
+                ),
+            ).play(hands)
+            total_reward += sum(record.rewards["hero"] for record in records)
+            total_hands += hands
+        self.simulated_hands += total_hands
+        return total_reward / max(total_hands, 1)
+
+    def evaluate(
+        self,
+        worlds: Sequence[OpponentWorld],
+        observations: Sequence[OpponentObservation],
+    ) -> list[SimulationResult]:
+        if not worlds:
+            raise ValueError("At least one world is required")
+        self.calls += 1
+        posteriors = self._posterior(worlds, observations)
         results: list[SimulationResult] = []
         for world, posterior in zip(worlds, posteriors, strict=True):
-            totals = {name: 0.0 for name in self.PAYOFFS}
-            for _ in range(self.rollouts):
-                action = self._sample_action(world, self.rng.random())
-                for response, payoff in self.PAYOFFS.items():
-                    totals[response] += payoff[action]
-            values = {name: total / self.rollouts for name, total in totals.items()}
-            best = max(values, key=values.get)
+            values = {
+                response: self._rollout_value(world, response)
+                for response in RESPONSE_POLICIES
+            }
+            best_response = max(values, key=values.get)
             results.append(
                 SimulationResult(
-                    world.name,
-                    posterior,
-                    best,
-                    values[best],
-                    values,
+                    world_name=world.name,
+                    posterior=posterior,
+                    best_response=best_response,
+                    expected_bb_per_decision=values[best_response],
+                    response_values=values,
+                    rollout_hands=self.rollouts,
                 )
             )
         return sorted(results, key=lambda result: result.posterior, reverse=True)
 
     @staticmethod
-    def choose_response(results: Sequence[SimulationResult]) -> tuple[str, float]:
+    def choose_response(
+        results: Sequence[SimulationResult],
+    ) -> tuple[str, float]:
         if not results:
             return "balanced", 0.0
         aggregate: Counter[str] = Counter()

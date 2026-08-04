@@ -6,36 +6,70 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
-from .models import ActionType
+from .models import ActionEvent, ActionType
 
-_ACTIONS = (ActionType.FOLD, ActionType.CHECK_CALL, ActionType.RAISE)
+
+@dataclass(frozen=True)
+class OpponentObservation:
+    """One opponent action with the legal-action context needed for interpretation."""
+
+    action: ActionType
+    facing_bet: bool
+
+    @classmethod
+    def from_event(cls, event: ActionEvent) -> OpponentObservation:
+        return cls(action=event.action, facing_bet=event.to_call > 1e-9)
 
 
 @dataclass(frozen=True)
 class OpponentWorld:
+    """Compact conditional opponent policy used for detection and rollout.
+
+    The three parameters are identifiable from public action histories without
+    conflating checks with calls or treating an illegal fold as evidence.
+    """
+
     name: str
-    fold_probability: float
-    call_probability: float
-    raise_probability: float
+    open_raise_probability: float
+    fold_vs_bet_probability: float
+    reraise_probability: float
     prior: float = 1.0
     rationale: str = ""
 
     def __post_init__(self) -> None:
-        values = (self.fold_probability, self.call_probability, self.raise_probability)
-        if any(value < 0.0 for value in values):
-            raise ValueError("World probabilities must be non-negative")
-        if not math.isclose(sum(values), 1.0, abs_tol=1e-6):
-            raise ValueError("World action probabilities must sum to one")
+        values = (
+            self.open_raise_probability,
+            self.fold_vs_bet_probability,
+            self.reraise_probability,
+        )
+        if any(not 0.0 <= value <= 1.0 for value in values):
+            raise ValueError("World conditional probabilities must be in [0, 1]")
         if self.prior <= 0.0:
             raise ValueError("World prior must be positive")
 
-    def probability(self, action: ActionType, floor: float = 1e-4) -> float:
-        values = {
-            ActionType.FOLD: self.fold_probability,
-            ActionType.CHECK_CALL: self.call_probability,
-            ActionType.RAISE: self.raise_probability,
+    def action_probabilities(self, facing_bet: bool) -> dict[ActionType, float]:
+        if not facing_bet:
+            return {
+                ActionType.FOLD: 0.0,
+                ActionType.CHECK_CALL: 1.0 - self.open_raise_probability,
+                ActionType.RAISE: self.open_raise_probability,
+            }
+        continue_probability = 1.0 - self.fold_vs_bet_probability
+        return {
+            ActionType.FOLD: self.fold_vs_bet_probability,
+            ActionType.CHECK_CALL: continue_probability * (1.0 - self.reraise_probability),
+            ActionType.RAISE: continue_probability * self.reraise_probability,
         }
-        return max(values[action], floor)
+
+    def probability(
+        self,
+        observation: OpponentObservation,
+        floor: float = 1e-4,
+    ) -> float:
+        return max(
+            self.action_probabilities(observation.facing_bet)[observation.action],
+            floor,
+        )
 
 
 @dataclass(frozen=True)
@@ -47,13 +81,15 @@ class SurpriseUpdate:
 
 
 class SurpriseDetector:
+    """Sliding-window normalized negative-log-likelihood change detector."""
+
     def __init__(
         self,
         window_size: int = 24,
         min_observations: int = 12,
-        threshold: float = 0.54,
+        threshold: float = 0.07,
         probability_floor: float = 1e-4,
-        cooldown_observations: int = 12,
+        cooldown_observations: int = 16,
     ) -> None:
         if window_size < 2:
             raise ValueError("window_size must be at least two")
@@ -74,21 +110,29 @@ class SurpriseDetector:
         self._scores.clear()
         self._last_detection = -10**9
 
+    def score(
+        self,
+        predicted_probability: float,
+        expected_surprise: float = 0.0,
+    ) -> float:
+        probability = min(max(predicted_probability, self.probability_floor), 1.0)
+        normalized = -math.log(probability) / -math.log(self.probability_floor)
+        return max(0.0, min(normalized, 1.0) - max(expected_surprise, 0.0))
+
     def update(
         self,
         predicted_probability: float,
         expected_surprise: float = 0.0,
     ) -> SurpriseUpdate:
-        probability = min(max(predicted_probability, self.probability_floor), 1.0)
-        raw_score = -math.log(probability) / -math.log(self.probability_floor)
-        score = max(0.0, min(raw_score, 1.0) - max(expected_surprise, 0.0))
+        score = self.score(predicted_probability, expected_surprise)
         self._scores.append(score)
         self._updates += 1
         mean_score = sum(self._scores) / len(self._scores)
+        cooled_down = self._updates - self._last_detection >= self.cooldown_observations
         detected = (
             len(self._scores) >= self.min_observations
             and mean_score >= self.threshold
-            and self._updates - self._last_detection >= self.cooldown_observations
+            and cooled_down
         )
         if detected:
             self._last_detection = self._updates
@@ -100,76 +144,79 @@ class HypothesisGenerator(Protocol):
 
     def generate(
         self,
-        observations: Sequence[ActionType],
+        observations: Sequence[OpponentObservation],
         current_worlds: Sequence[OpponentWorld],
     ) -> list[OpponentWorld]: ...
 
 
+def empirical_world(
+    observations: Sequence[OpponentObservation],
+    *,
+    name: str = "empirical_shift",
+    prior: float = 1.5,
+    smoothing: float = 1.0,
+) -> OpponentWorld:
+    unopened = [observation for observation in observations if not observation.facing_bet]
+    faced = [observation for observation in observations if observation.facing_bet]
+    open_raises = sum(observation.action is ActionType.RAISE for observation in unopened)
+    open_raise_probability = (open_raises + smoothing) / (
+        len(unopened) + 2.0 * smoothing
+    )
+    folds = sum(observation.action is ActionType.FOLD for observation in faced)
+    fold_vs_bet_probability = (folds + smoothing) / (len(faced) + 2.0 * smoothing)
+    continued = [
+        observation for observation in faced if observation.action is not ActionType.FOLD
+    ]
+    reraises = sum(observation.action is ActionType.RAISE for observation in continued)
+    reraise_probability = (reraises + smoothing) / (
+        len(continued) + 2.0 * smoothing
+    )
+    return OpponentWorld(
+        name=name,
+        open_raise_probability=open_raise_probability,
+        fold_vs_bet_probability=fold_vs_bet_probability,
+        reraise_probability=reraise_probability,
+        prior=prior,
+        rationale="Smoothed conditional frequencies by betting context.",
+    )
+
+
 class HeuristicHypothesisGenerator:
+    """Deterministic offline generator used for CI and mechanism ablations."""
+
     def __init__(self, smoothing: float = 1.0) -> None:
         self.smoothing = smoothing
         self.calls = 0
 
-    @staticmethod
-    def _world(
-        name: str,
-        fold: float,
-        call: float,
-        raise_: float,
-        rationale: str,
-        prior: float = 1.0,
-    ) -> OpponentWorld:
-        total = fold + call + raise_
-        return OpponentWorld(
-            name,
-            fold / total,
-            call / total,
-            raise_ / total,
-            prior,
-            rationale,
-        )
-
     def generate(
         self,
-        observations: Sequence[ActionType],
+        observations: Sequence[OpponentObservation],
         current_worlds: Sequence[OpponentWorld],
     ) -> list[OpponentWorld]:
         del current_worlds
         self.calls += 1
-        counts = Counter(observations)
-        denominator = len(observations) + self.smoothing * len(_ACTIONS)
-        empirical = {
-            action: (counts[action] + self.smoothing) / denominator for action in _ACTIONS
-        }
         return [
+            empirical_world(observations, smoothing=self.smoothing),
             OpponentWorld(
-                "empirical_shift",
-                empirical[ActionType.FOLD],
-                empirical[ActionType.CHECK_CALL],
-                empirical[ActionType.RAISE],
-                1.5,
-                "Smoothed action frequencies in the surprise window.",
+                name="aggressive_switch",
+                open_raise_probability=0.48,
+                fold_vs_bet_probability=0.18,
+                reraise_probability=0.30,
+                rationale="Frequent opening raises, low folding, and more reraising.",
             ),
-            self._world(
-                "aggressive_switch",
-                0.13,
-                0.42,
-                0.45,
-                "A persistent increase in raises is consistent with a LAG or tilt regime.",
+            OpponentWorld(
+                name="passive_switch",
+                open_raise_probability=0.08,
+                fold_vs_bet_probability=0.18,
+                reraise_probability=0.05,
+                rationale="Low initiative and call-heavy continuing ranges.",
             ),
-            self._world(
-                "passive_switch",
-                0.24,
-                0.67,
-                0.09,
-                "A call-heavy, low-raise regime is consistent with passive play.",
-            ),
-            self._world(
-                "tight_switch",
-                0.48,
-                0.39,
-                0.13,
-                "A fold-heavy regime is consistent with a tighter range.",
+            OpponentWorld(
+                name="tight_switch",
+                open_raise_probability=0.14,
+                fold_vs_bet_probability=0.56,
+                reraise_probability=0.08,
+                rationale="Low opening pressure and high fold-to-bet frequency.",
             ),
         ]
 
@@ -188,17 +235,29 @@ HYPOTHESIS_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": [
                     "name",
-                    "fold_probability",
-                    "call_probability",
-                    "raise_probability",
+                    "open_raise_probability",
+                    "fold_vs_bet_probability",
+                    "reraise_probability",
                     "prior",
                     "rationale",
                 ],
                 "properties": {
                     "name": {"type": "string"},
-                    "fold_probability": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "call_probability": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "raise_probability": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "open_raise_probability": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                    },
+                    "fold_vs_bet_probability": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                    },
+                    "reraise_probability": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                    },
                     "prior": {"type": "number", "exclusiveMinimum": 0.0},
                     "rationale": {"type": "string"},
                 },
@@ -209,6 +268,8 @@ HYPOTHESIS_SCHEMA: dict[str, Any] = {
 
 
 class ProviderHypothesisGenerator:
+    """Provider-backed conditional world generator using Structured Outputs."""
+
     def __init__(self, provider: Any) -> None:
         if not hasattr(provider, "structured"):
             raise TypeError("provider must implement structured(...)")
@@ -218,52 +279,50 @@ class ProviderHypothesisGenerator:
 
     def generate(
         self,
-        observations: Sequence[ActionType],
+        observations: Sequence[OpponentObservation],
         current_worlds: Sequence[OpponentWorld],
     ) -> list[OpponentWorld]:
         self.calls += 1
+        conditional_counts = Counter(
+            f"{'facing_bet' if observation.facing_bet else 'unopened'}:"
+            f"{observation.action.value}"
+            for observation in observations
+        )
         response = self.provider.structured(
             instructions=(
-                "Generate two to four concise, falsifiable opponent-policy hypotheses for a "
-                "surprising poker action stream. Use only fold, check_call, and raise "
-                "frequencies. Each probability vector must sum to one. Do not choose an action."
+                "Generate two to four concise, falsifiable opponent-policy hypotheses. "
+                "Model opening raise, fold versus bet, and reraise probabilities. "
+                "Do not choose a hero action or provide hidden chain-of-thought."
             ),
             state={
-                "recent_actions": [action.value for action in observations],
-                "recent_action_counts": dict(Counter(action.value for action in observations)),
+                "recent_observations": [asdict(observation) for observation in observations],
+                "conditional_counts": dict(conditional_counts),
                 "current_worlds": [asdict(world) for world in current_worlds],
             },
             schema_name="opponent_regime_hypotheses",
             schema=HYPOTHESIS_SCHEMA,
         )
         self.last_response = response
-        worlds: list[OpponentWorld] = []
-        for item in response.payload["worlds"]:
-            total = sum(
-                float(item[key])
-                for key in ("fold_probability", "call_probability", "raise_probability")
+        worlds = [
+            OpponentWorld(
+                name=str(item["name"]),
+                open_raise_probability=float(item["open_raise_probability"]),
+                fold_vs_bet_probability=float(item["fold_vs_bet_probability"]),
+                reraise_probability=float(item["reraise_probability"]),
+                prior=float(item["prior"]),
+                rationale=str(item["rationale"]),
             )
-            if total <= 0.0:
-                continue
-            worlds.append(
-                OpponentWorld(
-                    str(item["name"]),
-                    float(item["fold_probability"]) / total,
-                    float(item["call_probability"]) / total,
-                    float(item["raise_probability"]) / total,
-                    float(item["prior"]),
-                    str(item["rationale"]),
-                )
-            )
+            for item in response.payload["worlds"]
+        ]
         if len(worlds) < 2:
             raise ValueError("Provider returned fewer than two valid hypotheses")
         return worlds
 
 
 DEFAULT_WORLD = OpponentWorld(
-    "stable_tag",
-    0.31,
-    0.56,
-    0.13,
-    rationale="Initial balanced prior before enough opponent actions are observed.",
+    name="stable_tag",
+    open_raise_probability=0.18,
+    fold_vs_bet_probability=0.42,
+    reraise_probability=0.10,
+    rationale="Initial TAG-like conditional prior before formation.",
 )

@@ -4,7 +4,10 @@ import gzip
 import json
 from pathlib import Path
 
-from reflexive_poker.phase1_evidence_bundle import _artifact_provenance, audit_phase1_evidence_bundle
+from reflexive_poker.phase1_evidence_bundle import (
+    _artifact_provenance,
+    audit_phase1_evidence_bundle,
+)
 
 
 def _artifact(path: Path, *, valid: bool, predictions: int) -> None:

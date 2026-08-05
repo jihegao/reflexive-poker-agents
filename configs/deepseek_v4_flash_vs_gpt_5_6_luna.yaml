@@ -1,0 +1,168 @@
+protocol:
+  id: deepseek-v4-flash-vs-gpt-5.6-luna-v1
+  status: protocol_only
+  title: "DeepSeek V4 Flash vs GPT-5.6 Luna：只靠大脑、翻开 GTO、再带上自省和仿真，谁更会打德州？"
+  core_claim: "会解释 GTO，不等于能按 GTO 行动；会自省，也不等于能多赢筹码。"
+  repository_baseline_commit: ab169d4d1ccd58d57b09f8b43480b899e1cbb1aa
+  preregistration_required_for_confirmatory_run: true
+
+models:
+  - camp: deepseek
+    provider: opencode-go
+    requested_model: deepseek-v4-flash
+  - camp: luna
+    provider: codex
+    requested_model: gpt-5.6-luna
+
+table_rules:
+  game: no_limit_texas_holdem_cash
+  rules_engine: pokerkit
+  starting_stack_bb: 100
+  small_blind_bb: 0.5
+  big_blind_bb: 1.0
+  ante_bb: 0.0
+  rake: false
+  allowed_raise_sizes: ["0.5_pot", "0.75_pot", "1.0_pot", "all_in"]
+  model_returns_action_intent_only: true
+  engine_owns_dealing_legality_side_pots_showdown_and_chip_conservation: true
+
+information_boundary:
+  seat_private_visibility_only: true
+  hide_opponent_hole_cards: true
+  hide_private_tool_results: true
+  hide_private_audit_logs: true
+  hide_model_identity_from_agents: true
+  public_red_blue_camps: true
+  public_history_window_is_fixed: true
+
+pairing:
+  identical_deck_sequence: true
+  seat_mirroring: true
+  mirrored_branches_isolated: true
+  statistical_unit: paired_deck_block
+
+inference_contract:
+  fixed_prompt: true
+  fixed_sampling_parameters: true
+  fixed_reasoning_budget: true
+  fixed_history_window: true
+  fixed_max_output_tokens: true
+  hidden_chain_of_thought_requested: false
+  recorded_model_fields: [action_intent, concise_rationale, confidence]
+
+provider_gate:
+  require_exact_model_identity: true
+  require_zero_unresolved_timeouts: true
+  require_zero_unresolved_provider_errors: true
+  require_zero_fallbacks: true
+  require_zero_wrong_model_responses: true
+  require_zero_version_drift: true
+  invalidate_entire_paired_block_on_failure: true
+  rule_bot_takeover_allowed: false
+
+rounds:
+  round_1_raw_heads_up:
+    question: "谁的原生扑克理解和策略更好？"
+    players: 2
+    tools: []
+    external_reference: none
+    pilot:
+      deck_sequences: 50
+      mirrored_hands: 100
+      evidence_label: exploratory
+    confirmatory:
+      deck_sequences: 500
+      mirrored_hands: 1000
+    primary_metrics: [paired_bb_per_100, invalid_or_contradictory_action_rate, solver_regret]
+    efficiency_metrics: [latency_ms, tokens, cost_usd]
+
+  round_2_frozen_gto_reference:
+    question: "谁更能把外部知识转化为决策？"
+    players: 2
+    realtime_retrieval_allowed: false
+    solver_tool_allowed: false
+    conditions: [raw, masked_gto, gto]
+    budget_matched: true
+    reference_pack:
+      path: null
+      sha256: null
+      status: pending_freeze
+      required_sections:
+        - heads_up_100bb_preflop_ranges
+        - standard_bet_sizes
+        - board_texture_frequency_principles
+        - defense_bluff_and_value_ratios
+    primary_estimand: "regret_masked_minus_regret_gto"
+    compare_difference_in_differences: true
+    prohibited_claim: "模型实现了 GTO"
+    allowed_claim: "参考冻结的 GTO 摘要后表现改善"
+
+  round_3_six_max_tools:
+    question: "谁更会利用自省和仿真，在多人博弈中形成优势？"
+    players: 6
+    players_per_camp: 3
+    agent_scheduler: mesa
+    rules_engine: pokerkit
+    all_camp_seat_assignments: 20
+    random_button_rotation: true
+    main_condition: reflection_plus_simulation
+    shadow_conditions: [tools_off, reflection_only, reflection_plus_simulation]
+    shadow_fork_from_identical_checkpoint: true
+    tools:
+      reflect_update:
+        timing: after_each_hand
+        private_structured_state: true
+        bounded_tokens: true
+        append_free_form_history: false
+      equity_simulate:
+        visible_information_only: true
+        range_supplied_by_model: true
+        algorithm: fixed_monte_carlo
+        rollouts_per_call: 5000
+        max_calls_per_decision: 1
+        shared_seed_rule: true
+    pilot:
+      seat_assignments: 20
+      deck_seeds_per_assignment: 2
+      hands_per_seed: 20
+      total_hands: 800
+      evidence_label: exploratory
+    primary_metric: camp_total_net_bb
+    auxiliary_metrics:
+      - post_reflection_action_change_rate
+      - repeated_error_reduction
+      - opponent_range_calibration
+      - post_simulation_action_flip_rate
+      - regret_improvement_per_cost
+      - tool_failure_misuse_and_latency
+
+winner_policy:
+  report_paired_bb_per_100_with_95_percent_interval: true
+  interval_crosses_zero_means_tie: true
+  independent_leaderboards: [return, understanding, tool_uplift, efficiency]
+  composite_ai_iq_score_prohibited: true
+
+required_artifacts:
+  - protocol.yaml
+  - model_manifest.json
+  - prompt_and_gto_hashes.json
+  - provider_gate.json
+  - hands.jsonl
+  - decisions.jsonl
+  - reflections.jsonl
+  - tool_calls.jsonl
+  - cost_ledger.csv
+  - summary.json
+  - public_replay.jsonl
+  - private_audit.jsonl
+
+privacy:
+  public_replay_must_exclude_hidden_hole_cards: true
+  public_replay_must_exclude_private_tool_results: true
+  public_replay_must_exclude_private_reflections: true
+  private_audit_access_isolated: true
+
+publication:
+  pilot_label: "第一夜观察（探索性）"
+  confirmatory_label: "复赛：第一夜的赢家经得起镜像和扩样吗？"
+  pilot_must_not_be_presented_as_confirmatory: true

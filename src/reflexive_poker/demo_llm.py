@@ -193,10 +193,28 @@ def decide(table: DemoTable, actor: int | None = None) -> DemoDecision:
         "confidence": round(float(payload.get("confidence", 0.0)), 3),
         "summary": str(payload.get("situation_summary", ""))[:300],
         "rationale": str(payload.get("rationale", ""))[:500],
+        "selfModel": str(payload.get("self_model", ""))[:300],
+        "opponentModel": str(payload.get("opponent_model", ""))[:300],
         "riskFlags": [str(value)[:160] for value in payload.get("risk_flags", [])[:4]],
+        "nextStep": str(payload.get("next_step", ""))[:300],
         "provider": response.provider,
         "model": response.model,
         "readOnly": table.controller_for(actor) == "human",
+        "state": {
+            "street": str(state["street"]),
+            "board": list(state["community_cards"]),
+            "potBb": round(float(state["pot"]), 2),
+            "toCallBb": round(float(state["to_call"]), 2),
+            "stackBb": round(float(state["stack"]), 2),
+            "activePlayers": int(state["active_players"]),
+            "equityEstimate": round(float(state["equity_estimate"]), 4),
+            "potOdds": round(float(state["pot_odds"]), 4),
+            "predictedAllFold": round(float(state["predicted_all_fold"]), 4),
+            "opponentAggressionMean": round(
+                float(state["opponent_aggression_mean"]), 4
+            ),
+            "opponentFoldMean": round(float(state["opponent_fold_mean"]), 4),
+        },
     }
     return DemoDecision(action, raise_scale, advice, response)
 
@@ -255,7 +273,12 @@ def reflect_and_patch(table: DemoTable, actor: int = 0) -> DemoReflection:
         "decisionReview": str(payload.get("decision_review", ""))[:500],
         "whatWorked": [str(value)[:160] for value in payload.get("what_worked", [])[:4]],
         "whatFailed": [str(value)[:160] for value in payload.get("what_failed", [])[:4]],
+        "beliefUpdates": [
+            str(value)[:160] for value in payload.get("belief_updates", [])[:4]
+        ],
         "strategyAdjustment": str(payload.get("strategy_adjustment", ""))[:300],
+        "calibrationNote": str(payload.get("calibration_note", ""))[:300],
+        "confidenceAfter": round(float(payload.get("confidence_after", 0.0)), 3),
         "provider": response.provider,
         "model": response.model,
         "rawBytes": len(json.dumps(payload, ensure_ascii=False)),

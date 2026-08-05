@@ -45,6 +45,7 @@ def test_demo_api_persists_owner_table_and_keeps_spectators_read_only(tmp_path: 
         state = spectator.get(f"/api/tables/{table_id}").json()
         assert state["owner"] is False
         assert state["providerUsage"] == {}
+        assert state["handHistory"] == []
         denied = spectator.post(
             f"/api/tables/{table_id}/actions",
             json={"action": "check_call", "raise_scale": 0.5},
@@ -68,6 +69,20 @@ def test_mock_llm_controls_hand_and_applies_post_hand_patch(tmp_path: Path) -> N
         assert state["controller"] == "llm_closed_loop"
         assert state["strategy"]["version"] == 2
         assert state["providerUsage"]["mock_calls"] >= 2
+        assert len(state["handHistory"]) == 1
+        archived = state["handHistory"][0]
+        assert len(archived["board"]) == 5
+        assert archived["actions"]
+        assert archived["decisionTraces"]
+        assert archived["reflections"]
+        decision = archived["decisionTraces"][0]
+        assert decision["actionIndex"] is not None
+        assert decision["state"]["street"] in {"preflop", "flop", "turn", "river"}
+        assert "opponentModel" in decision
+        reflection = archived["reflections"][0]
+        assert "beliefUpdates" in reflection
+        assert "calibrationNote" in reflection
+        assert 0.0 <= reflection["confidenceAfter"] <= 1.0
 
 
 def test_switch_to_human_invalidates_in_flight_llm_response(

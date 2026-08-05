@@ -43,6 +43,23 @@ type Advice = {
   readOnly: boolean;
   seat?: number;
   handIndex?: number | null;
+  actionIndex?: number | null;
+  selfModel?: string;
+  opponentModel?: string;
+  nextStep?: string;
+  state?: {
+    street: string;
+    board: string[];
+    potBb: number;
+    toCallBb: number;
+    stackBb: number;
+    activePlayers: number;
+    equityEstimate: number;
+    potOdds: number;
+    predictedAllFold: number;
+    opponentAggressionMean: number;
+    opponentFoldMean: number;
+  };
 };
 
 type Reflection = {
@@ -54,8 +71,52 @@ type Reflection = {
   strategyAdjustment: string;
   whatWorked: string[];
   whatFailed: string[];
+  beliefUpdates?: string[];
   provider?: string;
   model?: string;
+  calibrationNote?: string;
+  confidenceAfter?: number;
+};
+
+type HandAction = {
+  hand_index: number;
+  street: string;
+  actor: string;
+  seat: number;
+  action: string;
+  raise_scale: number;
+  to_call: number;
+  paid: number;
+  pot_before: number;
+  active_players: number;
+  controller: string;
+  model: string | null;
+};
+
+type ArchivedSeat = {
+  seat: number;
+  name: string;
+  strategy: string;
+  controller: string;
+  model: string;
+  cards: string[];
+  active: boolean;
+  stackBb: number;
+  rewardBb: number;
+  strategyVersion: number;
+};
+
+type HandArchive = {
+  handIndex: number;
+  button: number;
+  board?: string[];
+  winners: string[];
+  showdown: boolean;
+  rewards: Record<string, number>;
+  seats?: ArchivedSeat[];
+  actions: HandAction[];
+  decisionTraces?: Advice[];
+  reflections?: Reflection[];
 };
 
 type PlayerConfig = {
@@ -84,6 +145,7 @@ type TableState = {
   providerMode: "mock" | "live_aliyun";
   model: string;
   completedHandCount: number;
+  handHistory: HandArchive[];
   liveCallBudget: { used: number; limit: number; warning: boolean; exhausted: boolean };
   hand: null | {
     handIndex: number;
@@ -223,7 +285,7 @@ function SeatView({ seat }: { seat: Seat }) {
   );
 }
 
-function TableCenter({ state }: { state: TableState }) {
+function TableCenter({ state, onReview }: { state: TableState; onReview: () => void }) {
   const hand = state.hand!;
   return (
     <section className="table-stage">
@@ -241,9 +303,105 @@ function TableCenter({ state }: { state: TableState }) {
           <span>HAND {hand.handIndex + 1} COMPLETE</span>
           <b>{hand.winners.map((winner) => winner === "hero" ? "Hero" : winner.split("_").slice(2).join(" ")).join(" + ")} 获胜</b>
           <em className={(hand.rewards.hero || 0) >= 0 ? "win" : "loss"}>{(hand.rewards.hero || 0) >= 0 ? "+" : ""}{(hand.rewards.hero || 0).toFixed(1)} BB</em>
+          <button onClick={onReview}>查看本手复盘</button>
         </div>
       )}
     </section>
+  );
+}
+
+function archivedSeatLabel(hand: HandArchive, seat: number) {
+  const player = hand.seats?.find((item) => item.seat === seat);
+  if (seat === 0) return "Hero";
+  const actor = hand.actions.find((item) => item.seat === seat)?.actor || "";
+  const fallbackStrategy = actor.split("_").slice(2).join("_");
+  const strategy = player?.strategy || fallbackStrategy;
+  return strategy ? `${LABELS[strategy] || strategy} · Seat ${seat}` : `Seat ${seat}`;
+}
+
+function HandReview({ state, onClose }: { state: TableState; onClose: () => void }) {
+  const latest = state.handHistory.at(-1)?.handIndex ?? 0;
+  const [selectedHand, setSelectedHand] = useState(latest);
+  const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
+  const hand = state.handHistory.find((item) => item.handIndex === selectedHand) || state.handHistory.at(-1);
+  if (!hand) return null;
+  const actions = selectedSeat === null ? hand.actions : hand.actions.filter((action) => action.seat === selectedSeat);
+  const reflections = (hand.reflections || []).filter((reflection) => selectedSeat === null || reflection.seat === selectedSeat);
+  const traces = hand.decisionTraces || [];
+  const visibleTraceCount = selectedSeat === null ? traces.length : traces.filter((trace) => trace.seat === selectedSeat).length;
+  const availableSeats = hand.seats || Array.from(new Set(hand.actions.map((action) => action.seat))).sort().map((seat) => {
+    const action = hand.actions.find((item) => item.seat === seat)!;
+    return { seat, name: action.actor, strategy: action.actor.split("_").slice(2).join("_"), controller: action.controller, model: action.model || "", cards: [], active: true, stackBb: 0, rewardBb: hand.rewards[action.actor] || 0, strategyVersion: 0 };
+  });
+  const winnerLabels = hand.winners.map((winner) => {
+    const seat = hand.seats?.find((item) => item.name === winner)?.seat ?? hand.actions.find((item) => item.actor === winner)?.seat;
+    return seat === undefined ? winner : archivedSeatLabel(hand, seat);
+  });
+  return (
+    <div className="review-overlay" role="dialog" aria-modal="true" aria-label="逐手牌局档案">
+      <section className="review-panel">
+        <header className="review-header">
+          <div><span>HAND ARCHIVE · OWNER ONLY</span><h2>逐手模型决策与反思</h2><p>这里展示模型主动输出的可审计解释，不是未公开的隐性思维链。</p></div>
+          <button aria-label="关闭牌局档案" onClick={onClose}>×</button>
+        </header>
+        <nav className="hand-tabs" aria-label="选择手牌">
+          {state.handHistory.map((item) => <button key={item.handIndex} className={item.handIndex === hand.handIndex ? "selected" : ""} onClick={() => { setSelectedHand(item.handIndex); setSelectedSeat(null); }}>HAND {item.handIndex + 1}</button>)}
+        </nav>
+        <div className="review-summary">
+          <div><span>BOARD</span><div className="review-cards">{(hand.board || []).map((card) => <Card key={card} value={card} />)}</div></div>
+          <div><span>WINNER</span><b>{winnerLabels.join(" + ")}</b><small>{hand.showdown ? "SHOWDOWN" : "UNCONTESTED"}</small></div>
+          <div><span>ACTIONS</span><b>{hand.actions.length}</b><small>{visibleTraceCount} MODEL TRACES · {reflections.length} REFLECTIONS</small></div>
+        </div>
+        <div className="seat-filter" aria-label="按座位筛选">
+          <button className={selectedSeat === null ? "selected" : ""} onClick={() => setSelectedSeat(null)}>全部座位</button>
+          {availableSeats.map((seat) => <button key={seat.seat} className={selectedSeat === seat.seat ? "selected" : ""} onClick={() => setSelectedSeat(seat.seat)}>{archivedSeatLabel(hand, seat.seat)}{seat.controller === "llm_closed_loop" ? " · LLM" : ""}</button>)}
+        </div>
+        <div className="review-grid">
+          <section className="action-timeline">
+            <div className="review-section-head"><span>行动与当时的模型解释</span><b>{actions.length} STEPS</b></div>
+            {actions.map((action) => {
+              const actionIndex = hand.actions.indexOf(action);
+              const seatActionIndex = hand.actions
+                .slice(0, actionIndex + 1)
+                .filter((item) => item.seat === action.seat && item.controller === "llm_closed_loop")
+                .length - 1;
+              const trace = traces.find((item) => item.seat === action.seat && item.actionIndex === actionIndex)
+                || (action.controller === "llm_closed_loop" ? traces.filter((item) => item.seat === action.seat)[seatActionIndex] : undefined);
+              return (
+                <article className="action-step" key={`${actionIndex}-${action.seat}`}>
+                  <div className="action-marker"><i>{actionIndex + 1}</i><span /></div>
+                  <div className="action-content">
+                    <div className="action-line"><span>{LABELS[action.street] || action.street}</span><b>{archivedSeatLabel(hand, action.seat)}</b><em>{LABELS[action.action] || action.action}{action.action === "raise" ? ` · ${action.raise_scale >= 1.2 ? "ALL-IN" : `${Math.round(action.raise_scale * 100)}% POT`}` : ""}</em></div>
+                    <div className="action-numbers"><span>投入 {action.paid.toFixed(1)} BB</span><span>行动前底池 {action.pot_before.toFixed(1)} BB</span><span>{action.active_players} 人在局</span></div>
+                    {trace ? <div className="trace-card">
+                      <div className="trace-head"><span>{trace.readOnly ? "只读建议" : "公开模型解释"}</span><b>{trace.model || action.model || "LLM"}</b><em>{Math.round((trace.confidence || 0) * 100)}%</em></div>
+                      <h3>{trace.summary || "模型未提供局面摘要"}</h3>
+                      <p>{trace.rationale || "—"}</p>
+                      {trace.state && <div className="trace-metrics"><span>EQ {(trace.state.equityEstimate * 100).toFixed(1)}%</span><span>ODDS {(trace.state.potOdds * 100).toFixed(1)}%</span><span>FOLD {(trace.state.predictedAllFold * 100).toFixed(1)}%</span><span>POT {trace.state.potBb.toFixed(1)}</span></div>}
+                      {(trace.selfModel || trace.opponentModel || trace.nextStep) && <details><summary>展开自我模型、对手模型与下一步</summary>{trace.selfModel && <p><b>自我模型</b>{trace.selfModel}</p>}{trace.opponentModel && <p><b>对手模型</b>{trace.opponentModel}</p>}{trace.nextStep && <p><b>下一步</b>{trace.nextStep}</p>}</details>}
+                      {!!trace.riskFlags?.length && <div className="risk-list">{trace.riskFlags.map((risk) => <span key={risk}>{risk}</span>)}</div>}
+                    </div> : <p className="rule-explanation">{action.controller === "llm_closed_loop" ? "此旧记录没有可关联的模型解释。" : "规则或人工行动，不产生 LLM 推理记录。"}</p>}
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+          <section className="reflection-review">
+            <div className="review-section-head"><span>盘后反思</span><b>{reflections.length} RECORDS</b></div>
+            {reflections.length ? reflections.map((reflection, index) => <article className="reflection-card" key={`${reflection.seat}-${index}`}>
+              <div className="reflection-card-head"><div><span>{reflection.seat === undefined ? "LLM" : archivedSeatLabel(hand, reflection.seat)}</span><b>{reflection.model || "model"}</b></div><em>{reflection.confidenceAfter === undefined ? "—" : `${Math.round(reflection.confidenceAfter * 100)}%`}</em></div>
+              <h3>结果复述</h3><p>{reflection.outcomeSummary || "—"}</p>
+              <h3>决策复盘</h3><p>{reflection.decisionReview || "—"}</p>
+              {!!reflection.whatWorked?.length && <div className="reflection-list worked"><b>有效</b>{reflection.whatWorked.map((item) => <span key={item}>{item}</span>)}</div>}
+              {!!reflection.whatFailed?.length && <div className="reflection-list failed"><b>失效</b>{reflection.whatFailed.map((item) => <span key={item}>{item}</span>)}</div>}
+              {!!reflection.beliefUpdates?.length && <div className="belief-updates"><b>信念更新</b>{reflection.beliefUpdates.map((item) => <span key={item}>{item}</span>)}</div>}
+              <div className="strategy-adjustment"><span>下一手策略调整</span><p>{reflection.strategyAdjustment || "保持当前策略"}</p></div>
+              {reflection.calibrationNote && <small className="calibration-note">校准：{reflection.calibrationNote}</small>}
+            </article>) : <div className="reflection-empty">本手没有 LLM 盘后反思。只有实际行动过的 LLM 座位会生成反思。</div>}
+          </section>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -377,6 +535,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const refreshTimer = useRef<number | null>(null);
 
   const load = useCallback(async (tableId: string) => {
@@ -421,6 +580,7 @@ export default function App() {
       const value = await request<TableState>("/api/tables", { method: "POST", body: JSON.stringify({ provider_mode: providerMode, opponents: players.slice(1).map((player) => player.strategy), seat_configs: players }) });
       localStorage.setItem("poker_demo_table", value.tableId);
       setSelectedSeat(null);
+      setReviewOpen(false);
       setEvents([]);
       setState(value);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -446,16 +606,17 @@ export default function App() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark">R</span><div><b>REFLEXIVE TABLE</b><small>POKER AGENT LAB</small></div></div>
         <div className="table-id"><span>LOCAL TABLE</span><b>{state.tableId}</b><i>{phaseLabel}</i></div>
-        <div className="top-actions"><span className={state.owner ? "owner-badge" : "spectator-badge"}>{state.owner ? "OWNER SESSION" : "READ-ONLY"}</span><button aria-label="结束并离开牌局" disabled={busy || !state.owner} onClick={() => void command("finish")}>×</button></div>
+        <div className="top-actions"><button className="archive-trigger" disabled={!state.handHistory.length} onClick={() => setReviewOpen(true)}>牌局档案 <b>{state.handHistory.length}</b></button><span className={state.owner ? "owner-badge" : "spectator-badge"}>{state.owner ? "OWNER SESSION" : "READ-ONLY"}</span><button aria-label="结束并离开牌局" disabled={busy || !state.owner} onClick={() => void command("finish")}>×</button></div>
       </header>
       <div className="workspace">
         <LeftRail state={state} events={events} busy={busy} command={command} selectedSeat={selectedSeat} onSelect={setSelectedSeat} />
-        <TableCenter state={state} />
+        <TableCenter state={state} onReview={() => setReviewOpen(true)} />
         <AgentRail state={state} busy={busy} command={command} />
       </div>
       <ActionDock state={state} busy={busy} command={command} />
       {busy && <div className="busy-bar"><span /></div>}
       {error && <div className="toast">{error}<button onClick={() => setError(null)}>×</button></div>}
+      {reviewOpen && <HandReview state={state} onClose={() => setReviewOpen(false)} />}
     </div>
   );
 }

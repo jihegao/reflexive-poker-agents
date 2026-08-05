@@ -116,6 +116,58 @@ the intervention and accounting only; it cannot establish a profitability advant
 The checked-in clean pilot report is under
 `results/second_order/low_cost_clean_pilot_seed9200/`.
 
+## Run the three-round DeepSeek-vs-Luna tournament
+
+`three-round` reuses `LLMPlayer`, the common Hold'em environment, provider
+identity/cost traces, and `expctl`'s per-match checkpoints. Round 1 disables
+the simulator equity field and reflections; Round 2 adds the frozen bucketed
+MCCFR reference (an approximate-equilibrium reference, not solver-grade GTO);
+Round 3 seats three agents from each model family and enables the existing
+reflection memory plus bounded equity simulation context.
+
+The default config is deliberately a one-seed, one-hand rehearsal:
+
+```bash
+uv run expctl config validate configs/three_round.yaml --output json
+uv run expctl run start \
+  --config configs/three_round.yaml \
+  --experiment three-round \
+  --request-id three-round-pilot-v1 \
+  --tag three-round-pilot \
+  --allow-dirty-worktree \
+  --output json
+```
+
+The pilot writes `matches/*.json`, decision/reflection JSONL traces,
+`match_summary.csv`, `paired_summary.csv`, seed-clustered inference, large-pot
+sensitivity, cost accounting, `gto_reference.json`, `provider_gate.json`, and
+`evidence_gate.json` below the run's artifact directory. `PLAN.json` locks the
+full schedule before the first match, every checkpoint carries that plan hash,
+and `COMPLETED.json` is written only after all expected matches pass structural
+completion checks. Round-3 lineups are emitted as color-swapped complementary
+pairs so every even lineup count balances the two model families across seats.
+
+A dirty-worktree rehearsal must be explicitly marked. A formal config must use
+an even round-3 lineup count, meet its frozen minimum seed count, complete every
+planned hand and mirror, retain complete token accounting, and run from a clean
+source snapshot. The comparison remains a model-plus-serving-stack comparison;
+it does not attest an immutable provider-side model snapshot.
+
+The balanced 10-seed tournament is frozen separately in
+`configs/three_round_formal.yaml`. It schedules two hands in every heads-up
+mirror and in two complementary 3-vs-3 lineups, so Round 3 reflection from the
+first hand can affect the second. Start it only from a clean worktree and omit
+`--allow-dirty-worktree`:
+
+```bash
+uv run expctl run start \
+  --config configs/three_round_formal.yaml \
+  --experiment three-round \
+  --request-id three-round-formal-v1 \
+  --tag three-round-formal \
+  --output json
+```
+
 ## Earlier experiments
 
 The repository also contains the situated-reflection, image-shaping, and player-type matchup environments used in earlier project phases. These experiments consistently separate mechanism claims from poker-profit claims: improved self-model fidelity or belief control does not by itself establish higher reward.

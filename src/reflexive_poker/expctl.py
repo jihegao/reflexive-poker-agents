@@ -42,6 +42,7 @@ EXPERIMENTS = {
     "paper-phase1": "Run preflight, offline evidence, and paired closed-loop confirmation.",
     "paper-phase2-preflight": "Run the bounded four-system Phase 2 provider preflight only.",
     "paper-phase2-offline": "Run four-system Phase 2 offline evidence after the frozen readiness gate.",
+    "three-round": "Run the resumable DeepSeek-vs-Luna three-round poker tournament.",
 }
 
 
@@ -650,6 +651,80 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                     },
                 )
         _event(run_dir, "phase_completed", phase="closed_loop")
+    elif experiment == "three-round":
+        from .three_round_experiment import ThreeRoundConfig, run_three_round_experiment
+
+        source_provenance = _freeze_run_sources(metadata, artifacts)
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
+        three_round = config.get("three_round")
+        if not isinstance(three_round, dict):
+            raise ExpctlError("CONFIG_INVALID", "three-round requires a three_round config section")
+        models = three_round.get("models")
+        if not isinstance(models, list) or len(models) != 2:
+            raise ExpctlError("CONFIG_INVALID", "three_round.models must contain two serving systems")
+        model_specs: list[tuple[str, str, str]] = []
+        for item in models:
+            if not isinstance(item, dict) or not item.get("label") or not item.get("provider") or not item.get("model"):
+                raise ExpctlError(
+                    "CONFIG_INVALID",
+                    "three_round.models require label, provider, and model",
+                )
+            model_specs.append((str(item["label"]), str(item["provider"]), str(item["model"])))
+        result = run_three_round_experiment(
+            ThreeRoundConfig(
+                seeds=tuple(
+                    range(
+                        int(three_round.get("seed_start", 9950)),
+                        int(three_round.get("seed_start", 9950))
+                        + int(three_round.get("seed_count", 1)),
+                    )
+                ),
+                hands=int(three_round.get("hands", 1)),
+                rounds=tuple(int(value) for value in three_round.get("rounds", (1, 2, 3))),
+                round3_lineup_count=int(three_round.get("round3_lineup_count", 1)),
+                gto_iterations=int(three_round.get("gto_iterations", 2_000)),
+                equity_samples=int(three_round.get("equity_samples", 16)),
+                memory_hands=int(three_round.get("memory_hands", 6)),
+                evidence_tier=str(three_round.get("evidence_tier", "pilot")),
+                minimum_formal_seeds=int(three_round.get("minimum_formal_seeds", 10)),
+                bootstrap_samples=int(three_round.get("bootstrap_samples", 5_000)),
+                permutation_samples=int(three_round.get("permutation_samples", 20_000)),
+                source_clean=not bool(metadata.get("allow_dirty_worktree", False)),
+                output_dir=artifacts / "three_round",
+                model_specs=tuple(model_specs),
+            )
+        )
+        _atomic_json(
+            artifacts / "THREE_ROUND_RESULT.json",
+            {
+                "provider_gate": result["provider_gate"],
+                "evidence_gate": result["evidence_gate"],
+                "match_count": int(result["provider_gate"]["match_count"]),
+                "valid_match_count": int(result["provider_gate"]["valid_match_count"]),
+            },
+        )
+        if not result["provider_gate"]["valid"]:
+            raise ExpctlError(
+                "PROVIDER_GATE_FAILED",
+                "three-round provider gate failed; artifacts are audit-only",
+                retryable=True,
+                details={"provider_gate": result["provider_gate"]},
+            )
+        if (
+            result["evidence_gate"]["evidence_tier"] == "formal"
+            and not result["evidence_gate"]["formal_conclusion_allowed"]
+        ):
+            raise ExpctlError(
+                "EVIDENCE_GATE_FAILED",
+                "three-round formal completion gate failed; artifacts are audit-only",
+                retryable=False,
+                details={"evidence_gate": result["evidence_gate"]},
+            )
     else:
         raise ExpctlError("EXPERIMENT_UNKNOWN", f"Unknown experiment: {experiment}")
 

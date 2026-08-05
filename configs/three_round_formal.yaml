@@ -1,0 +1,49 @@
+# Frozen balanced tournament schedule. This config is intentionally separate
+# from the one-seed wiring pilot and must run without --allow-dirty-worktree.
+protocol: prbench-cross-model-v1
+evidence_layers:
+  tournament:
+    rounds: [1, 2, 3]
+    paired_heads_up_mirrors: true
+    six_max_complementary_lineups: true
+    raw_traces: true
+provider_gate:
+  require_zero_unresolved_failures: true
+  require_zero_fallbacks: true
+  require_selected_model_identity_match: true
+  require_complete_token_accounting: true
+resumable_execution:
+  checkpoint: per_match
+  provider_ledger_checkpoint: provider_adapter_trace
+  resume_rule: rerun_the_exact_same_request_id
+  immutable_plan_hash: true
+  atomic_completion_marker: COMPLETED.json
+paper_phase1:
+  models:
+    - provider: opencode-go
+      model: deepseek-v4-flash
+    - provider: codex
+      model: gpt-5.6-luna
+  pricing_manifest:
+    path: pricing/phase1-2026-08-03.json
+    sha256: da9c708135d10940236f476eac4603c347244afabee4173f4ef653fae41ea6a1
+three_round:
+  evidence_tier: formal
+  seed_start: 10000
+  seed_count: 10
+  hands: 2
+  rounds: [1, 2, 3]
+  round3_lineup_count: 2
+  gto_iterations: 20000
+  equity_samples: 64
+  memory_hands: 6
+  minimum_formal_seeds: 10
+  bootstrap_samples: 5000
+  permutation_samples: 20000
+  models:
+    - label: deepseek
+      provider: opencode-go
+      model: deepseek-v4-flash
+    - label: luna
+      provider: codex
+      model: gpt-5.6-luna

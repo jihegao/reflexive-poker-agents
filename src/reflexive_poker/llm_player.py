@@ -200,8 +200,9 @@ class OpenAIResponsesProvider:
         return self._call(
             instructions=(
                 "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
-                f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
-                "odds rather than inventing card probabilities. Return a concise audit rationale, "
+                f"Choose exactly one legal action from: {legal}. Use supplied equity when present; "
+                "otherwise reason from the visible cards, pot and legal actions. Do not invent "
+                "hidden card information. Return a concise audit rationale, "
                 "assumptions, opponent model, self-model, risk flags, and next-step plan. A "
                 "raise_scale of 1.25 means all-in. Do not "
                 "produce hidden chain-of-thought or long private deliberation."
@@ -514,8 +515,9 @@ class OpenCodeGoProvider:
         return self._call(
             instructions=(
                 "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
-                f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
-                "odds rather than inventing card probabilities. A raise_scale of 1.25 means "
+                f"Choose exactly one legal action from: {legal}. Use supplied equity when present; "
+                "otherwise reason from the visible cards, pot and legal actions. Do not invent "
+                "hidden card information. A raise_scale of 1.25 means "
                 "all-in. Return concise audit fields only."
             ),
             state=state,
@@ -713,8 +715,9 @@ class CodexProvider:
         return self._call(
             instructions=(
                 "You are a bounded Texas Hold'em decision agent in a reproducible simulator. "
-                f"Choose exactly one legal action from: {legal}. Use the supplied equity and pot "
-                "odds rather than inventing card probabilities. A raise_scale of 1.25 means "
+                f"Choose exactly one legal action from: {legal}. Use supplied equity when present; "
+                "otherwise reason from the visible cards, pot and legal actions. Do not invent "
+                "hidden card information. A raise_scale of 1.25 means "
                 "all-in. Return concise audit fields only."
             ),
             state=state,
@@ -765,7 +768,11 @@ class DeterministicNarrativeProvider:
 
     def decide(self, state: dict[str, Any]) -> ProviderResponse:
         started = time.perf_counter()
-        equity = float(state["equity_estimate"])
+        # Raw-LLM rounds intentionally omit the simulator's equity tool.  The
+        # deterministic provider still needs a stable fixture action, so use a
+        # neutral value only for mock wiring; live providers must reason from
+        # the visible state themselves in those rounds.
+        equity = float(state.get("equity_estimate", 0.5))
         pot_odds = float(state["pot_odds"])
         fold_prob = float(state.get("predicted_all_fold", 0.5))
         to_call = float(state["to_call"])
@@ -973,11 +980,15 @@ class LLMPlayer(PokerAgent):
         opponents: tuple[str, ...] = (),
         memory_hands: int | None = None,
         reflexive_enabled: bool = True,
+        reflection_enabled: bool = True,
+        simulation_enabled: bool = True,
     ) -> None:
         super().__init__(name, seed, style)
         self.opponents = opponents
         self.provider = provider
         self.reflexive_enabled = reflexive_enabled
+        self.reflection_enabled = reflection_enabled
+        self.simulation_enabled = simulation_enabled
         self.condition = "llm_reflexive_on" if reflexive_enabled else "llm_reflexive_off"
         self.depth_controller = AdaptiveDepthController(opponents)
         self.trace_dir = trace_dir
@@ -1057,10 +1068,11 @@ class LLMPlayer(PokerAgent):
             "to_call": context.to_call,
             "stack": context.stack,
             "legal_actions": [action.value for action in context.legal_actions],
-            "equity_estimate": equity,
             "pot_odds": self._pot_odds(context),
             "public_history": [],
         }
+        if self.simulation_enabled:
+            state["equity_estimate"] = equity
         if self.reflexive_enabled:
             state.update(
                 {
@@ -1110,12 +1122,16 @@ class LLMPlayer(PokerAgent):
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
     def act(self, context: DecisionContext) -> Decision:
-        equity = estimate_equity(
-            context.hole_cards,
-            context.board,
-            context.active_players - 1,
-            self.rng,
-            samples=self.style.equity_samples,
+        equity = (
+            estimate_equity(
+                context.hole_cards,
+                context.board,
+                context.active_players - 1,
+                self.rng,
+                samples=self.style.equity_samples,
+            )
+            if self.simulation_enabled
+            else 0.0
         )
         fallback = self._policy(
             context,
@@ -1205,6 +1221,8 @@ class LLMPlayer(PokerAgent):
         reward = float(record.rewards.get(self.name, 0.0))
         self.recent_rewards.append(reward)
         decisions = self._hand_decisions.pop(record.hand_index, [])
+        if not self.reflection_enabled:
+            return
         state = {
             "task": "reflect_on_completed_hand",
             "reasoning_mode": "second_order" if self.reflexive_enabled else "first_order",
@@ -1297,6 +1315,9 @@ class LLMPlayer(PokerAgent):
             **super().snapshot(),
             "provider": self.provider.name,
             "model": self.provider.model,
+            "reflexive_enabled": self.reflexive_enabled,
+            "reflection_enabled": self.reflection_enabled,
+            "simulation_enabled": self.simulation_enabled,
             "decision_trace_count": len(self.decision_traces),
             "reflection_trace_count": len(self.reflection_traces),
             "provider_failures": self.provider_failures,

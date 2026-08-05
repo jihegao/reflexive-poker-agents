@@ -1,0 +1,50 @@
+# Three-round hotspot tournament. The first run is intentionally a small,
+# resumable pilot; increase the frozen seed/horizon only before formal launch.
+protocol: prbench-cross-model-v1
+evidence_layers:
+  tournament:
+    rounds: [1, 2, 3]
+    paired_heads_up_mirrors: true
+    six_max_lineup_rotation: true
+    raw_traces: true
+provider_gate:
+  require_zero_unresolved_failures: true
+  require_zero_fallbacks: true
+  require_exact_model_identity: true
+  require_complete_token_accounting: true
+resumable_execution:
+  checkpoint: per_match
+  provider_ledger_checkpoint: provider_adapter_trace
+  incomplete_directory_suffix: .running
+  resume_rule: rerun_the_exact_same_command
+  immutable_plan_hash: true
+  atomic_completion_marker: COMPLETED.json
+paper_phase1:
+  models:
+    - provider: opencode-go
+      model: deepseek-v4-flash
+    - provider: codex
+      model: gpt-5.6-luna
+  pricing_manifest:
+    path: pricing/phase1-2026-08-03.json
+    sha256: da9c708135d10940236f476eac4603c347244afabee4173f4ef653fae41ea6a1
+three_round:
+  evidence_tier: pilot
+  seed_start: 9950
+  seed_count: 1
+  hands: 1
+  rounds: [1, 2, 3]
+  round3_lineup_count: 1
+  gto_iterations: 2000
+  equity_samples: 16
+  memory_hands: 6
+  minimum_formal_seeds: 10
+  bootstrap_samples: 5000
+  permutation_samples: 20000
+  models:
+    - label: deepseek
+      provider: opencode-go
+      model: deepseek-v4-flash
+    - label: luna
+      provider: codex
+      model: gpt-5.6-luna

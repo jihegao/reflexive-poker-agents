@@ -1,0 +1,38 @@
+# Frozen 30-seed mechanism pilot for surprise-triggered regime adaptation.
+protocol: regime-adaptation-formal-pilot-v1
+evidence_layers:
+  simulation:
+    claim_boundary: heuristic_generator_and_full_hand_policy_rollout
+  llm_confirmation:
+    enabled: false
+provider_gate:
+  live_provider_required: false
+  heuristic_outputs_must_not_be_labeled_live_llm: true
+  require_complete_schedule_for_formal_conclusion: true
+resumable_execution:
+  registry_root: results/experiments
+  checkpoint: per_condition_seed_and_mirror
+  resume_rule: exact_frozen_plan_only
+  immutable_plan_hash: true
+  atomic_checkpoint: true
+  corrupt_checkpoint_policy: fail_closed
+regime_adaptation:
+  run_id: regime-formal-pilot-v1
+  output_dir: results/regime_adaptation/formal_pilot_v1
+  conditions: [baseline, reflection, reflection_simulation]
+  mirrors: [0, 1]
+  seeds: {start: 9300, count: 30}
+  hands: 320
+  switch_hand: 160
+  equity_samples: 4
+  recovery_window: 32
+  simulation_rollout_hands: 36
+  simulation_equity_samples: 1
+  formation_observations: 48
+  calibration_observations: 32
+  primary_metrics: [recovery_hands, post_switch_bb100]
+  inference:
+    contrast: reflection_simulation_minus_reflection
+    unit: seed_and_seat_mirror_block
+    interval: two_sided_student_t_95_percent
+    required_valid_paired_blocks: 60

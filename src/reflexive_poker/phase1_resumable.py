@@ -67,6 +67,15 @@ PROTOCOL_SOURCE_FILES = PROTOCOL_SEMANTIC_SOURCE_FILES + (
     "scripts/run_phase1_experiment.py",
     "scripts/run_phase1_resumable.py",
     "configs/phase2.yaml",
+    "src/reflexive_poker/regime_adaptation.py",
+    "src/reflexive_poker/regime_agents.py",
+    "src/reflexive_poker/regime_detection.py",
+    "src/reflexive_poker/regime_experiment.py",
+    "src/reflexive_poker/regime_runner.py",
+    "src/reflexive_poker/regime_simulation.py",
+    "src/reflexive_poker/regime_statistics.py",
+    "scripts/run_regime_resumable.py",
+    "configs/regime_pilot.yaml",
 )
 
 

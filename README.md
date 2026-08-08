@@ -260,6 +260,13 @@ uv run expctl run start \
   --tag paper-phase1 \
   --output json
 
+uv run expctl run start \
+  --config configs/regime_pilot.yaml \
+  --experiment regime-adaptation \
+  --request-id regime-formal-pilot-v1 \
+  --tag regime-formal-pilot \
+  --output json
+
 uv run expctl run status <run-id> --output json
 uv run expctl run logs <run-id> --follow --format jsonl
 uv run expctl analyze <run-id> --output json
@@ -318,6 +325,13 @@ directories are retained under an `interrupted/` directory and are never treated
 evidence. LLM primary-call allocation is checked against a conservative per-block upper
 bound before a new block starts; unresolved failures, fallback, identity mismatch,
 unbalanced paired calls, or incomplete accounting invalidate that block.
+
+The regime-adaptation pilot uses the same `expctl` lifecycle and adds atomic checkpoints
+for every `condition × seed × mirror` block. Its frozen 30-seed config, standalone resume
+command, completion artifacts, Student-t paired inference, and fail-closed claim boundary
+are documented in
+[`docs/regime_adaptation_experiment.md`](docs/regime_adaptation_experiment.md). Long
+runtime is handled by checkpoint/resume rather than an unlimited foreground timeout.
 
 ## Evidence boundary
 

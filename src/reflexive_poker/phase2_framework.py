@@ -14,6 +14,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any
 
 import numpy as np
@@ -58,6 +59,25 @@ class Phase2OfflineRunConfig:
     base_seed: int = 20260802
     max_calls_per_system: int = 1_200
     max_retries_per_system: int = 200
+
+
+@dataclass(frozen=True)
+class Phase2PowerAnalysisConfig:
+    """Pre-outcome paired-return power calculation bound to Phase 1 evidence.
+
+    The caller provides an effect-size and standard-deviation estimate extracted
+    from the immutable Phase 1 bundle.  This function does not inspect, fit, or
+    alter Phase 2 outcome rows, so its manifest can be frozen before any Phase
+    2 provider call.
+    """
+
+    phase1_outcome_lock: str
+    paired_seed_count: int
+    heads_up_hands: int
+    expected_return_delta: float
+    paired_seed_stddev: float
+    alpha: float = 0.05
+    target_power: float = 0.80
 
 
 @dataclass(frozen=True)
@@ -130,6 +150,65 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+def build_phase2_power_analysis(
+    config: Phase2PowerAnalysisConfig,
+    *,
+    protocol: str = "prbench-cross-model-v1",
+) -> dict[str, Any]:
+    """Create a transparent normal-approximation paired-block power manifest.
+
+    It is deliberately an *assumption manifest*, not a result: `valid` only
+    means the locked design reaches the stated target power under its supplied
+    Phase-1-derived effect-size assumptions.
+    """
+
+    if not config.phase1_outcome_lock:
+        raise Phase2ExecutionError("power analysis requires a Phase 1 outcome lock")
+    if config.paired_seed_count <= 40 or config.heads_up_hands <= 20:
+        raise Phase2ExecutionError("power analysis requires the larger Phase 2 design")
+    if not 0.0 < config.alpha < 1.0 or not 0.0 < config.target_power < 1.0:
+        raise Phase2ExecutionError("alpha and target power must lie strictly between zero and one")
+    if not np.isfinite(config.expected_return_delta) or not np.isfinite(config.paired_seed_stddev):
+        raise Phase2ExecutionError("power inputs must be finite")
+    if config.paired_seed_stddev <= 0.0:
+        raise Phase2ExecutionError("paired-seed standard deviation must be positive")
+
+    normal = NormalDist()
+    z_critical = normal.inv_cdf(1.0 - config.alpha / 2.0)
+    noncentrality = abs(config.expected_return_delta) * np.sqrt(config.paired_seed_count) / config.paired_seed_stddev
+    achieved_power = normal.cdf(-z_critical - noncentrality) + (1.0 - normal.cdf(z_critical - noncentrality))
+    return {
+        "schema_version": 1,
+        "valid": bool(achieved_power >= config.target_power),
+        "protocol": protocol,
+        "analysis_unit": "paired_seed_block",
+        "paired_seed_count": config.paired_seed_count,
+        "heads_up_hands": config.heads_up_hands,
+        "phase1_outcome_lock": config.phase1_outcome_lock,
+        "method": "two_sided_normal_approximation_for_paired_seed_mean",
+        "alpha": config.alpha,
+        "target_power": config.target_power,
+        "achieved_power": float(achieved_power),
+        "expected_return_delta": config.expected_return_delta,
+        "paired_seed_stddev": config.paired_seed_stddev,
+        "standardized_effect": config.expected_return_delta / config.paired_seed_stddev,
+        "assumption_source": "locked_phase1_evidence_bundle",
+    }
+
+
+def write_phase2_power_analysis(
+    path: Path,
+    config: Phase2PowerAnalysisConfig,
+    *,
+    protocol: str = "prbench-cross-model-v1",
+) -> dict[str, Any]:
+    """Persist the pre-outcome power manifest atomically for readiness input."""
+
+    payload = build_phase2_power_analysis(config, protocol=protocol)
+    _atomic_json(path, payload)
+    return payload
 
 
 def _validate_offline_result(

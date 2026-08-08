@@ -163,3 +163,34 @@ def test_phase2_offline_run_fails_before_any_outcome_call_without_frozen_inputs(
     with pytest.raises(ExpctlError, match="requires frozen preflight"):
         _run_experiment(metadata, tmp_path)
     assert calls == []
+
+
+def test_phase2_readiness_inputs_are_copied_before_the_worker_can_start(tmp_path: Path) -> None:
+    config = _load_config(Path("configs/phase2.yaml").resolve())
+    source_preflight = tmp_path / "source-preflight"
+    for provider, model in expctl._phase2_preflight_models(config):
+        slug = f"{provider}__{model}".replace("/", "_").replace(".", "_")
+        gate = source_preflight / slug / "provider_gate.json"
+        gate.parent.mkdir(parents=True)
+        gate.write_text(json.dumps({"provider": provider, "model": model}), encoding="utf-8")
+    source_price = tmp_path / "price.json"
+    source_price.write_text('{"frozen": true}', encoding="utf-8")
+    source_power = tmp_path / "power.json"
+    source_power.write_text('{"valid": true}', encoding="utf-8")
+
+    frozen = expctl._freeze_phase2_inputs(
+        tmp_path / "run",
+        config,
+        argparse.Namespace(
+            phase2_preflight_dir=str(source_preflight),
+            phase2_pricing_manifest=str(source_price),
+            phase2_power_analysis=str(source_power),
+        ),
+    )
+
+    frozen_price = Path(frozen["phase2_pricing_manifest"])
+    assert frozen_price.read_text(encoding="utf-8") == '{"frozen": true}'
+    assert frozen_price != source_price
+    source_price.write_text('{"frozen": false}', encoding="utf-8")
+    assert frozen_price.read_text(encoding="utf-8") == '{"frozen": true}'
+    assert len(frozen["phase2_frozen_inputs"]) == 6

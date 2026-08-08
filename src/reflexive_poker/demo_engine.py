@@ -512,17 +512,45 @@ class DemoTable:
         summary = {
             "handIndex": hand.hand_index,
             "button": hand.button,
+            "board": [card_to_str(card) for card in hand.board],
             "winners": [self.names[index] for index in winners],
             "showdown": hand.showdown,
             "rewards": {
                 self.names[index]: hand.rewards[index] for index in range(6)
             },
+            "seats": [
+                {
+                    "seat": index,
+                    "name": self.names[index],
+                    "strategy": (
+                        "hero" if index == 0 else self.config.opponents[index - 1]
+                    ),
+                    "controller": self.controller_for(index),
+                    "model": self.model_for(index),
+                    "cards": [card_to_str(card) for card in hand.holes[index]]
+                    if index == self.hero_seat
+                    or (hand.showdown and hand.active[index])
+                    else [],
+                    "active": hand.active[index],
+                    "stackBb": _round_bb(hand.stacks[index]),
+                    "rewardBb": hand.rewards[index],
+                    "strategyVersion": int(self.strategy_for(index)["version"]),
+                }
+                for index in range(6)
+            ],
             "strategyVersion": self.strategy["version"],
             "strategyVersions": [
                 int(self.strategy_for(seat)["version"]) for seat in range(6)
             ],
             "controller": self.controller,
             "actions": list(hand.actions),
+            "decisionTraces": [
+                dict(item)
+                for history in self.decision_histories
+                for item in history
+                if item.get("handIndex") == hand.hand_index
+            ],
+            "reflections": [],
         }
         self.completed_hands.append(summary)
         self._emit("hand.completed", summary)
@@ -675,6 +703,7 @@ class DemoTable:
                 **advice,
                 "seat": actor,
                 "handIndex": self.hand.hand_index if self.hand else None,
+                "actionIndex": len(self.hand.actions) if self.hand else None,
             }
         )
         del history[:-24]
@@ -687,9 +716,17 @@ class DemoTable:
 
     def record_reflection(self, reflection: dict[str, Any], *, actor: int = 0) -> None:
         memory = self.reflection_memory_for(actor)
-        memory.append({**reflection, "seat": actor})
+        recorded = {**reflection, "seat": actor}
+        memory.append(recorded)
         maximum = max(12, int(self.strategy_for(actor)["memoryHands"]))
         del memory[:-maximum]
+        hand_index = int(reflection.get("handIndex", -1))
+        for summary in reversed(self.completed_hands):
+            if int(summary.get("handIndex", -1)) == hand_index:
+                reflections = summary.setdefault("reflections", [])
+                if not any(int(item.get("seat", -1)) == actor for item in reflections):
+                    reflections.append(recorded)
+                break
         self._emit(
             "hero.reflection_completed" if actor == 0 else "player.reflection_completed",
             {
@@ -894,6 +931,50 @@ class DemoTable:
             and hand.actor == self.hero_seat
             and self.controller == "human"
         )
+        hand_history: list[dict[str, Any]] = []
+        if owner:
+            for stored in self.completed_hands:
+                archived = dict(stored)
+                hand_index = int(archived.get("handIndex", -1))
+                if not archived.get("decisionTraces"):
+                    archived["decisionTraces"] = [
+                        dict(item)
+                        for history in self.decision_histories
+                        for item in history
+                        if int(item.get("handIndex", -1)) == hand_index
+                    ]
+                if not archived.get("reflections"):
+                    archived["reflections"] = [
+                        dict(item)
+                        for seat in range(6)
+                        for item in self.reflection_memory_for(seat)
+                        if int(item.get("handIndex", -1)) == hand_index
+                    ]
+                if hand is not None and hand.hand_index == hand_index and hand_data:
+                    archived.setdefault("board", list(hand_data["board"]))
+                    archived.setdefault(
+                        "seats",
+                        [
+                            {
+                                "seat": seat["seat"],
+                                "name": seat["name"],
+                                "strategy": seat["strategy"],
+                                "controller": seat["controller"],
+                                "model": seat["model"],
+                                "cards": list(seat["cards"]),
+                                "active": seat["active"],
+                                "stackBb": seat["stackBb"],
+                                "rewardBb": float(
+                                    archived.get("rewards", {}).get(seat["name"], 0.0)
+                                ),
+                                "strategyVersion": int(
+                                    seat["strategyProfile"]["version"]
+                                ),
+                            }
+                            for seat in hand_data["seats"]
+                        ],
+                    )
+                hand_history.append(archived)
         return {
             "tableId": self.table_id,
             "version": self.version,
@@ -920,6 +1001,7 @@ class DemoTable:
                 else "mock-narrative-v1"
             ),
             "completedHandCount": len(self.completed_hands),
+            "handHistory": hand_history,
             "hand": hand_data,
         }
 

@@ -49,6 +49,7 @@ EXPERIMENTS = {
     "paper-phase2-preflight": "Run the bounded four-system Phase 2 provider preflight only.",
     "paper-phase2-offline": "Run four-system Phase 2 offline evidence after the frozen readiness gate.",
     "regime-adaptation": "Run or resume the frozen regime-switch formal pilot.",
+    "three-round": "Run the resumable DeepSeek-vs-Luna three-round poker tournament.",
 }
 
 
@@ -363,6 +364,21 @@ def _freeze_run_sources(metadata: dict[str, Any], artifacts: Path) -> dict[str, 
         if actual != expected:
             raise ExpctlError("FROZEN_CONFIG_MUTATED", "run-local frozen config hash changed")
         frozen_inputs["frozen_inputs/CONFIG.yaml"] = path
+    phase2_inputs = metadata.get("phase2_frozen_inputs")
+    if phase2_inputs is not None:
+        if not isinstance(phase2_inputs, dict):
+            raise ExpctlError("PHASE2_INPUTS_INVALID", "Phase 2 frozen-input metadata is invalid")
+        frozen_inputs = frozen_inputs or {}
+        for archive_name, details in sorted(phase2_inputs.items()):
+            if not isinstance(archive_name, str) or not isinstance(details, dict):
+                raise ExpctlError("PHASE2_INPUTS_INVALID", "Phase 2 frozen input entry is invalid")
+            path_value, expected = details.get("artifact_path"), details.get("sha256")
+            path = Path(str(path_value))
+            if not isinstance(expected, str) or not path.is_file():
+                raise ExpctlError("PHASE2_INPUT_MISSING", f"Phase 2 frozen input is missing: {archive_name}")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                raise ExpctlError("PHASE2_INPUT_MUTATED", f"Phase 2 frozen input changed: {archive_name}")
+            frozen_inputs[archive_name] = path
     provenance = freeze_phase1_source_snapshot(
         artifacts,
         allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
@@ -377,6 +393,80 @@ def _freeze_run_sources(metadata: dict[str, Any], artifacts: Path) -> dict[str, 
         }
         _atomic_json(artifacts / "SOURCE_PROVENANCE.json", provenance)
     return provenance
+
+
+def _copy_phase2_input(source: Path, destination: Path, *, label: str) -> dict[str, str]:
+    """Copy a formal input before worker spawn and retain its digest."""
+    if not source.is_file():
+        raise ExpctlError("PHASE2_INPUT_MISSING", f"Phase 2 {label} is not a regular file: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    return {
+        "artifact_path": str(destination),
+        "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+        "source_path": str(source),
+    }
+
+
+def _freeze_phase2_inputs(
+    run_dir: Path,
+    config: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Make the readiness evidence immutable before a Phase 2 worker exists."""
+    supplied = {
+        "phase2_preflight_dir": getattr(args, "phase2_preflight_dir", None),
+        "phase2_pricing_manifest": getattr(args, "phase2_pricing_manifest", None),
+        "phase2_power_analysis": getattr(args, "phase2_power_analysis", None),
+    }
+    missing = [name for name, value in supplied.items() if not value]
+    if missing:
+        raise ExpctlError(
+            "PHASE2_READINESS_INPUT_MISSING",
+            "paper-phase2-offline requires frozen preflight, pricing, and power artifacts",
+            details={"missing": missing},
+        )
+    phase2 = config.get("paper_phase2")
+    if not isinstance(phase2, dict):
+        raise ExpctlError("CONFIG_INVALID", "paper-phase2-offline requires paper_phase2")
+    preflight_source = Path(str(supplied["phase2_preflight_dir"])).resolve()
+    if not preflight_source.is_dir():
+        raise ExpctlError("PHASE2_INPUT_MISSING", f"Phase 2 preflight directory is missing: {preflight_source}")
+    snapshot_root = run_dir / "frozen_inputs" / "phase2"
+    frozen: dict[str, dict[str, str]] = {}
+    for provider, model in _phase2_preflight_models(config):
+        slug = f"{provider}__{model}".replace("/", "_").replace(".", "_")
+        archive_name = f"frozen_inputs/phase2/preflight/{slug}/provider_gate.json"
+        frozen[archive_name] = _copy_phase2_input(
+            preflight_source / slug / "provider_gate.json",
+            snapshot_root / "preflight" / slug / "provider_gate.json",
+            label=f"preflight gate for {provider}/{model}",
+        )
+    for key, archive_name, filename, label in (
+        (
+            "phase2_pricing_manifest",
+            "frozen_inputs/phase2/PHASE2_PRICE_MANIFEST.json",
+            "PHASE2_PRICE_MANIFEST.json",
+            "pricing manifest",
+        ),
+        (
+            "phase2_power_analysis",
+            "frozen_inputs/phase2/PHASE2_POWER_ANALYSIS.json",
+            "PHASE2_POWER_ANALYSIS.json",
+            "power analysis",
+        ),
+    ):
+        frozen[archive_name] = _copy_phase2_input(
+            Path(str(supplied[key])).resolve(),
+            snapshot_root / filename,
+            label=label,
+        )
+    return {
+        "phase2_preflight_dir": str(snapshot_root / "preflight"),
+        "phase2_pricing_manifest": str(snapshot_root / "PHASE2_PRICE_MANIFEST.json"),
+        "phase2_power_analysis": str(snapshot_root / "PHASE2_POWER_ANALYSIS.json"),
+        "phase2_frozen_inputs": frozen,
+    }
 
 
 def _run_offline_models(
@@ -720,6 +810,80 @@ def _run_experiment(metadata: dict[str, Any], run_dir: Path) -> None:
                     },
                 )
         _event(run_dir, "phase_completed", phase="closed_loop")
+    elif experiment == "three-round":
+        from .three_round_experiment import ThreeRoundConfig, run_three_round_experiment
+
+        source_provenance = _freeze_run_sources(metadata, artifacts)
+        _event(
+            run_dir,
+            "source_frozen",
+            source_fingerprint=source_provenance["source_fingerprint"],
+            source_snapshot_sha256=source_provenance["source_snapshot_sha256"],
+        )
+        three_round = config.get("three_round")
+        if not isinstance(three_round, dict):
+            raise ExpctlError("CONFIG_INVALID", "three-round requires a three_round config section")
+        models = three_round.get("models")
+        if not isinstance(models, list) or len(models) != 2:
+            raise ExpctlError("CONFIG_INVALID", "three_round.models must contain two serving systems")
+        model_specs: list[tuple[str, str, str]] = []
+        for item in models:
+            if not isinstance(item, dict) or not item.get("label") or not item.get("provider") or not item.get("model"):
+                raise ExpctlError(
+                    "CONFIG_INVALID",
+                    "three_round.models require label, provider, and model",
+                )
+            model_specs.append((str(item["label"]), str(item["provider"]), str(item["model"])))
+        result = run_three_round_experiment(
+            ThreeRoundConfig(
+                seeds=tuple(
+                    range(
+                        int(three_round.get("seed_start", 9950)),
+                        int(three_round.get("seed_start", 9950))
+                        + int(three_round.get("seed_count", 1)),
+                    )
+                ),
+                hands=int(three_round.get("hands", 1)),
+                rounds=tuple(int(value) for value in three_round.get("rounds", (1, 2, 3))),
+                round3_lineup_count=int(three_round.get("round3_lineup_count", 1)),
+                gto_iterations=int(three_round.get("gto_iterations", 2_000)),
+                equity_samples=int(three_round.get("equity_samples", 16)),
+                memory_hands=int(three_round.get("memory_hands", 6)),
+                evidence_tier=str(three_round.get("evidence_tier", "pilot")),
+                minimum_formal_seeds=int(three_round.get("minimum_formal_seeds", 10)),
+                bootstrap_samples=int(three_round.get("bootstrap_samples", 5_000)),
+                permutation_samples=int(three_round.get("permutation_samples", 20_000)),
+                source_clean=not bool(metadata.get("allow_dirty_worktree", False)),
+                output_dir=artifacts / "three_round",
+                model_specs=tuple(model_specs),
+            )
+        )
+        _atomic_json(
+            artifacts / "THREE_ROUND_RESULT.json",
+            {
+                "provider_gate": result["provider_gate"],
+                "evidence_gate": result["evidence_gate"],
+                "match_count": int(result["provider_gate"]["match_count"]),
+                "valid_match_count": int(result["provider_gate"]["valid_match_count"]),
+            },
+        )
+        if not result["provider_gate"]["valid"]:
+            raise ExpctlError(
+                "PROVIDER_GATE_FAILED",
+                "three-round provider gate failed; artifacts are audit-only",
+                retryable=True,
+                details={"provider_gate": result["provider_gate"]},
+            )
+        if (
+            result["evidence_gate"]["evidence_tier"] == "formal"
+            and not result["evidence_gate"]["formal_conclusion_allowed"]
+        ):
+            raise ExpctlError(
+                "EVIDENCE_GATE_FAILED",
+                "three-round formal completion gate failed; artifacts are audit-only",
+                retryable=False,
+                details={"evidence_gate": result["evidence_gate"]},
+            )
     else:
         raise ExpctlError("EXPERIMENT_UNKNOWN", f"Unknown experiment: {experiment}")
 
@@ -851,6 +1015,9 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
         config_bytes = config_path.read_bytes()
         _atomic_bytes(frozen_config_path, config_bytes)
         frozen_config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+    phase2_inputs: dict[str, Any] = {}
+    if args.experiment == "paper-phase2-offline":
+        phase2_inputs = _freeze_phase2_inputs(run_dir, config, args)
     pricing_artifact: Path | None = None
     if pricing is not None:
         pricing_artifact = run_dir / "frozen_inputs" / "PRICE_MANIFEST.json"
@@ -885,9 +1052,10 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "max_blocks": args.max_blocks,
         "allow_dirty_worktree": args.allow_dirty_worktree,
-        "phase2_preflight_dir": getattr(args, "phase2_preflight_dir", None),
-        "phase2_pricing_manifest": getattr(args, "phase2_pricing_manifest", None),
-        "phase2_power_analysis": getattr(args, "phase2_power_analysis", None),
+        "phase2_preflight_dir": phase2_inputs.get("phase2_preflight_dir"),
+        "phase2_pricing_manifest": phase2_inputs.get("phase2_pricing_manifest"),
+        "phase2_power_analysis": phase2_inputs.get("phase2_power_analysis"),
+        "phase2_frozen_inputs": phase2_inputs.get("phase2_frozen_inputs"),
         "frozen_config_path": str(frozen_config_path) if frozen_config_path else None,
         "frozen_config_sha256": frozen_config_sha256,
         "worker_command": worker_command,

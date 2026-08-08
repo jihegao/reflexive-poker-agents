@@ -45,6 +45,16 @@ expose an HTTP LLM gateway or accept arbitrary provider/model URLs.
 - The left Agent list shows each LLM seat's model. Clicking an LLM seat opens
   its current-hand decision history and saved reflections; the right rail stays
   dedicated to Hero and shows the current LLM thought.
+- The owner-only hand archive keeps every completed hand as a replay unit. Open
+  `牌局档案` (or `查看本手复盘`) to inspect the public action timeline, the model's
+  recorded situation summary/rationale/self-model/opponent-model/risk flags at
+  each LLM action, and every participating LLM seat's post-hand review, belief
+  updates, calibration, and next-hand strategy adjustment. These are
+  model-authored audit explanations, not a transcript of hidden chain of thought.
+- Completed-hand archives persist the public board, visible showdown cards,
+  action amounts, bounded decision traces, and reflections. Owner-only reasoning
+  data is omitted from spectator snapshots, and folded or non-showdown opponent
+  cards remain hidden.
 - Each hand begins at 100 BB. There is no hand limit; the table can only be ended
   after a hand completes, or ended immediately with the owner leave control.
 - The anonymous owner is identified by an HttpOnly cookie. Anyone without that

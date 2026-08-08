@@ -335,6 +335,21 @@ def _freeze_run_sources(metadata: dict[str, Any], artifacts: Path) -> dict[str, 
         if actual != expected:
             raise ExpctlError("PRICING_MANIFEST_MUTATED", "run-local pricing manifest hash changed")
         frozen_inputs = {"frozen_inputs/PRICE_MANIFEST.json": path}
+    phase2_inputs = metadata.get("phase2_frozen_inputs")
+    if phase2_inputs is not None:
+        if not isinstance(phase2_inputs, dict):
+            raise ExpctlError("PHASE2_INPUTS_INVALID", "Phase 2 frozen-input metadata is invalid")
+        frozen_inputs = frozen_inputs or {}
+        for archive_name, details in sorted(phase2_inputs.items()):
+            if not isinstance(archive_name, str) or not isinstance(details, dict):
+                raise ExpctlError("PHASE2_INPUTS_INVALID", "Phase 2 frozen input entry is invalid")
+            path_value, expected = details.get("artifact_path"), details.get("sha256")
+            path = Path(str(path_value))
+            if not isinstance(expected, str) or not path.is_file():
+                raise ExpctlError("PHASE2_INPUT_MISSING", f"Phase 2 frozen input is missing: {archive_name}")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                raise ExpctlError("PHASE2_INPUT_MUTATED", f"Phase 2 frozen input changed: {archive_name}")
+            frozen_inputs[archive_name] = path
     provenance = freeze_phase1_source_snapshot(
         artifacts,
         allow_dirty_worktree=bool(metadata.get("allow_dirty_worktree")),
@@ -349,6 +364,80 @@ def _freeze_run_sources(metadata: dict[str, Any], artifacts: Path) -> dict[str, 
         }
         _atomic_json(artifacts / "SOURCE_PROVENANCE.json", provenance)
     return provenance
+
+
+def _copy_phase2_input(source: Path, destination: Path, *, label: str) -> dict[str, str]:
+    """Copy a formal input before worker spawn and retain its digest."""
+    if not source.is_file():
+        raise ExpctlError("PHASE2_INPUT_MISSING", f"Phase 2 {label} is not a regular file: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    return {
+        "artifact_path": str(destination),
+        "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+        "source_path": str(source),
+    }
+
+
+def _freeze_phase2_inputs(
+    run_dir: Path,
+    config: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Make the readiness evidence immutable before a Phase 2 worker exists."""
+    supplied = {
+        "phase2_preflight_dir": getattr(args, "phase2_preflight_dir", None),
+        "phase2_pricing_manifest": getattr(args, "phase2_pricing_manifest", None),
+        "phase2_power_analysis": getattr(args, "phase2_power_analysis", None),
+    }
+    missing = [name for name, value in supplied.items() if not value]
+    if missing:
+        raise ExpctlError(
+            "PHASE2_READINESS_INPUT_MISSING",
+            "paper-phase2-offline requires frozen preflight, pricing, and power artifacts",
+            details={"missing": missing},
+        )
+    phase2 = config.get("paper_phase2")
+    if not isinstance(phase2, dict):
+        raise ExpctlError("CONFIG_INVALID", "paper-phase2-offline requires paper_phase2")
+    preflight_source = Path(str(supplied["phase2_preflight_dir"])).resolve()
+    if not preflight_source.is_dir():
+        raise ExpctlError("PHASE2_INPUT_MISSING", f"Phase 2 preflight directory is missing: {preflight_source}")
+    snapshot_root = run_dir / "frozen_inputs" / "phase2"
+    frozen: dict[str, dict[str, str]] = {}
+    for provider, model in _phase2_preflight_models(config):
+        slug = f"{provider}__{model}".replace("/", "_").replace(".", "_")
+        archive_name = f"frozen_inputs/phase2/preflight/{slug}/provider_gate.json"
+        frozen[archive_name] = _copy_phase2_input(
+            preflight_source / slug / "provider_gate.json",
+            snapshot_root / "preflight" / slug / "provider_gate.json",
+            label=f"preflight gate for {provider}/{model}",
+        )
+    for key, archive_name, filename, label in (
+        (
+            "phase2_pricing_manifest",
+            "frozen_inputs/phase2/PHASE2_PRICE_MANIFEST.json",
+            "PHASE2_PRICE_MANIFEST.json",
+            "pricing manifest",
+        ),
+        (
+            "phase2_power_analysis",
+            "frozen_inputs/phase2/PHASE2_POWER_ANALYSIS.json",
+            "PHASE2_POWER_ANALYSIS.json",
+            "power analysis",
+        ),
+    ):
+        frozen[archive_name] = _copy_phase2_input(
+            Path(str(supplied[key])).resolve(),
+            snapshot_root / filename,
+            label=label,
+        )
+    return {
+        "phase2_preflight_dir": str(snapshot_root / "preflight"),
+        "phase2_pricing_manifest": str(snapshot_root / "PHASE2_PRICE_MANIFEST.json"),
+        "phase2_power_analysis": str(snapshot_root / "PHASE2_POWER_ANALYSIS.json"),
+        "phase2_frozen_inputs": frozen,
+    }
 
 
 def _run_offline_models(
@@ -829,6 +918,9 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
     run_id = f"{stamp}-{uuid.uuid4().hex[:10]}"
     run_dir = _run_dir(root, run_id)
     run_dir.mkdir(parents=True)
+    phase2_inputs: dict[str, Any] = {}
+    if args.experiment == "paper-phase2-offline":
+        phase2_inputs = _freeze_phase2_inputs(run_dir, config, args)
     pricing_artifact: Path | None = None
     if pricing is not None:
         pricing_artifact = run_dir / "frozen_inputs" / "PRICE_MANIFEST.json"
@@ -863,9 +955,10 @@ def _start(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "max_blocks": args.max_blocks,
         "allow_dirty_worktree": args.allow_dirty_worktree,
-        "phase2_preflight_dir": getattr(args, "phase2_preflight_dir", None),
-        "phase2_pricing_manifest": getattr(args, "phase2_pricing_manifest", None),
-        "phase2_power_analysis": getattr(args, "phase2_power_analysis", None),
+        "phase2_preflight_dir": phase2_inputs.get("phase2_preflight_dir"),
+        "phase2_pricing_manifest": phase2_inputs.get("phase2_pricing_manifest"),
+        "phase2_power_analysis": phase2_inputs.get("phase2_power_analysis"),
+        "phase2_frozen_inputs": phase2_inputs.get("phase2_frozen_inputs"),
         "worker_command": worker_command,
     }
     if pricing is not None and pricing_artifact is not None:
